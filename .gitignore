@@ -1,0 +1,25 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+.firebaserc
+
+# Environment / secrets
+.env
+.env.local
+.secret*
+*.key
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
