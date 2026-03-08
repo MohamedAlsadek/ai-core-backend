@@ -67,7 +67,7 @@ exports.processAi = functions.https.onRequest({
     cors: true,
     invoker: "public",
 }, async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
     // ── Method ─────────────────────────────────────────────────────────────
     if (req.method !== "POST") {
         res.status(405).json({ error: "Method not allowed" });
@@ -79,7 +79,7 @@ exports.processAi = functions.https.onRequest({
         body =
             typeof req.body === "string" ? JSON.parse(req.body) : (_a = req.body) !== null && _a !== void 0 ? _a : {};
     }
-    catch (_u) {
+    catch (_t) {
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
@@ -93,13 +93,9 @@ exports.processAi = functions.https.onRequest({
         return;
     }
     // ── Auth ───────────────────────────────────────────────────────────────
+    // Tokens from cross-project apps (e.g. voicenote using ai-voice-note-29b96)
+    // can't be verified here — fall back to device-ID rate limiting instead.
     const auth = await (0, auth_1.verifyAuth)(req);
-    if (!auth.uid) {
-        res
-            .status(401)
-            .json({ error: (_b = auth.error) !== null && _b !== void 0 ? _b : "Unauthorized", code: "UNAUTHORIZED" });
-        return;
-    }
     // ── Rate limit ─────────────────────────────────────────────────────────
     const clientId = (0, rate_limiter_1.getClientId)(req, auth.uid);
     const { allowed, remaining } = await (0, rate_limiter_1.checkRateLimit)(clientId, appId);
@@ -124,7 +120,7 @@ exports.processAi = functions.https.onRequest({
     // ── Embed task (separate path) ─────────────────────────────────────────
     if (NON_CHAT_TASKS.has(task)) {
         if (task === "embed") {
-            const texts = (_c = body.texts) !== null && _c !== void 0 ? _c : [];
+            const texts = (_b = body.texts) !== null && _b !== void 0 ? _b : [];
             if (!Array.isArray(texts) || texts.length === 0) {
                 res.status(400).json({ error: "embed task requires a non-empty texts array" });
                 return;
@@ -139,20 +135,20 @@ exports.processAi = functions.https.onRequest({
                     input: texts,
                 });
                 const ordered = Array(texts.length).fill(null);
-                for (const item of (_d = response.data) !== null && _d !== void 0 ? _d : []) {
+                for (const item of (_c = response.data) !== null && _c !== void 0 ? _c : []) {
                     if (item.index >= 0 && item.index < texts.length) {
                         ordered[item.index] = item.embedding;
                     }
                 }
                 const embeddings = ordered.filter((e) => e !== null);
-                const totalTokens = (_f = (_e = response.usage) === null || _e === void 0 ? void 0 : _e.total_tokens) !== null && _f !== void 0 ? _f : 0;
+                const totalTokens = (_e = (_d = response.usage) === null || _d === void 0 ? void 0 : _d.total_tokens) !== null && _e !== void 0 ? _e : 0;
                 (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "embed", model: EMBED_MODEL, promptTokens: totalTokens, completionTokens: 0 }).catch(() => { });
                 res.json({ result: embeddings, tokensUsed: totalTokens });
             }
             catch (e) {
                 const err = e;
                 functions.logger.error("[processAi] embed error", { msg: err.message, appId });
-                res.status(502).json({ error: (_g = err.message) !== null && _g !== void 0 ? _g : "Embed error" });
+                res.status(502).json({ error: (_f = err.message) !== null && _f !== void 0 ? _f : "Embed error" });
             }
             return;
         }
@@ -170,9 +166,9 @@ exports.processAi = functions.https.onRequest({
     try {
         const isJson = JSON_TASKS.has(task);
         const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
-        const raw = (_k = (_j = (_h = completion.choices[0]) === null || _h === void 0 ? void 0 : _h.message) === null || _j === void 0 ? void 0 : _j.content) !== null && _k !== void 0 ? _k : "";
-        const promptTokens = (_m = (_l = completion.usage) === null || _l === void 0 ? void 0 : _l.prompt_tokens) !== null && _m !== void 0 ? _m : 0;
-        const completionTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.completion_tokens) !== null && _p !== void 0 ? _p : 0;
+        const raw = (_j = (_h = (_g = completion.choices[0]) === null || _g === void 0 ? void 0 : _g.message) === null || _h === void 0 ? void 0 : _h.content) !== null && _j !== void 0 ? _j : "";
+        const promptTokens = (_l = (_k = completion.usage) === null || _k === void 0 ? void 0 : _k.prompt_tokens) !== null && _l !== void 0 ? _l : 0;
+        const completionTokens = (_o = (_m = completion.usage) === null || _m === void 0 ? void 0 : _m.completion_tokens) !== null && _o !== void 0 ? _o : 0;
         const totalTokens = promptTokens + completionTokens;
         // ── Parse result ────────────────────────────────────────────────────
         let result;
@@ -180,8 +176,8 @@ exports.processAi = functions.https.onRequest({
             try {
                 const parsed = JSON.parse(raw);
                 result = {
-                    title: ((_q = parsed["title"]) !== null && _q !== void 0 ? _q : "").trim(),
-                    summary: ((_r = parsed["summary"]) !== null && _r !== void 0 ? _r : "").trim(),
+                    title: ((_p = parsed["title"]) !== null && _p !== void 0 ? _p : "").trim(),
+                    summary: ((_q = parsed["summary"]) !== null && _q !== void 0 ? _q : "").trim(),
                     actions: Array.isArray(parsed["actions"])
                         ? parsed["actions"].map(String)
                         : [],
@@ -190,7 +186,7 @@ exports.processAi = functions.https.onRequest({
                         : [],
                 };
             }
-            catch (_v) {
+            catch (_u) {
                 result = { title: "", summary: raw.trim(), actions: [], tags: [] };
             }
         }
@@ -199,7 +195,7 @@ exports.processAi = functions.https.onRequest({
                 const parsed = JSON.parse(raw);
                 result = Array.isArray(parsed) ? parsed.map(String) : [];
             }
-            catch (_w) {
+            catch (_v) {
                 result = [];
             }
         }
@@ -221,13 +217,13 @@ exports.processAi = functions.https.onRequest({
         const err = e;
         functions.logger.error("[processAi] OpenAI error", {
             msg: err.message,
-            cause: String((_s = err.cause) !== null && _s !== void 0 ? _s : ""),
+            cause: String((_r = err.cause) !== null && _r !== void 0 ? _r : ""),
             status: err.status,
             code: err.code,
             task,
             appId,
         });
-        res.status(502).json({ error: (_t = err.message) !== null && _t !== void 0 ? _t : "OpenAI error" });
+        res.status(502).json({ error: (_s = err.message) !== null && _s !== void 0 ? _s : "OpenAI error" });
     }
 });
 // ── Helper: verify Firestore is reachable (called by health check) ────────────

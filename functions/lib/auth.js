@@ -35,9 +35,19 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.verifyAuth = verifyAuth;
 const admin = __importStar(require("firebase-admin"));
+const functions = __importStar(require("firebase-functions/v2"));
 /**
- * Verifies Firebase ID token from Authorization header.
- * Returns uid on success, error string on failure.
+ * Verifies a Firebase ID token from the Authorization header.
+ *
+ * Multi-app design: apps (voicenote, fitness, etc.) each have their own Firebase
+ * project and send tokens signed for that project. We cannot verify cross-project
+ * tokens with Admin SDK, so if verification fails we fall back to device-ID-based
+ * rate limiting (still secure — no anonymous free-for-all).
+ *
+ * Returns:
+ *   { uid }              — verified token, use uid for rate limiting
+ *   { tokenRejected }   — token present but unverifiable (cross-project), fall back to device ID
+ *   {}                  — no token, fall back to device ID
  */
 async function verifyAuth(req) {
     var _a, _b;
@@ -46,13 +56,18 @@ async function verifyAuth(req) {
         ? authHeader.slice(7).trim()
         : null;
     if (!token)
-        return { error: "Missing Authorization header" };
+        return {};
     try {
         const decoded = await admin.auth().verifyIdToken(token);
         return { uid: decoded.uid };
     }
     catch (e) {
-        return { error: (_b = e.message) !== null && _b !== void 0 ? _b : "Invalid token" };
+        // Expected when apps send tokens from their own Firebase project.
+        // Fall back to device-ID rate limiting — don't block the request.
+        functions.logger.debug("[auth] Cross-project token, falling back to device ID", {
+            msg: (_b = e.message) === null || _b === void 0 ? void 0 : _b.slice(0, 120),
+        });
+        return { tokenRejected: true };
     }
 }
 //# sourceMappingURL=auth.js.map

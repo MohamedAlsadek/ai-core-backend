@@ -62,18 +62,14 @@ export const processAi = functions.https.onRequest(
     }
 
     // ── Auth ───────────────────────────────────────────────────────────────
+    // Tokens from cross-project apps (e.g. voicenote using ai-voice-note-29b96)
+    // can't be verified here — fall back to device-ID rate limiting instead.
     const auth = await verifyAuth(req as Parameters<typeof verifyAuth>[0]);
-    if (!auth.uid) {
-      res
-        .status(401)
-        .json({error: auth.error ?? "Unauthorized", code: "UNAUTHORIZED"});
-      return;
-    }
 
     // ── Rate limit ─────────────────────────────────────────────────────────
     const clientId = getClientId(
       req as Parameters<typeof getClientId>[0],
-      auth.uid,
+      auth.uid, // undefined for cross-project tokens → uses device ID
     );
     const {allowed, remaining} = await checkRateLimit(clientId, appId);
     if (!allowed) {
