@@ -2,16 +2,19 @@ import * as functions from "firebase-functions/v2";
 import * as admin from "firebase-admin";
 import OpenAI from "openai";
 import {defineSecret} from "firebase-functions/params";
-import {buildMessages, TaskPayload} from "./prompts";
+import {buildMessages, TaskPayload, TaskType} from "./prompts";
 import {trackUsage} from "../usage/tracker";
 import {verifyAuth} from "../auth";
 import {checkRateLimit, getClientId} from "../rate-limiter";
 
 const openaiKey = defineSecret("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
+const EMBED_MODEL = "text-embedding-3-small";
 
 // Tasks that return structured JSON from OpenAI
-const JSON_TASKS = new Set(["enhanceAll", "actions", "tags"]);
+const JSON_TASKS = new Set<TaskType>(["enhanceAll", "actions", "tags"]);
+// Tasks that don't go through the chat completions path
+const NON_CHAT_TASKS = new Set<TaskType>(["embed"]);
 
 // Allowed app IDs — add new apps here when onboarding them
 const ALLOWED_APP_IDS = new Set([
@@ -93,6 +96,44 @@ export const processAi = functions.https.onRequest(
       return;
     }
 
+    const openai = new OpenAI({apiKey});
+
+    // ── Embed task (separate path) ─────────────────────────────────────────
+    if (NON_CHAT_TASKS.has(task)) {
+      if (task === "embed") {
+        const texts = body.texts ?? [];
+        if (!Array.isArray(texts) || texts.length === 0) {
+          res.status(400).json({error: "embed task requires a non-empty texts array"});
+          return;
+        }
+        if (texts.length > 2048) {
+          res.status(400).json({error: "Max 2048 texts per embed request"});
+          return;
+        }
+        try {
+          const response = await openai.embeddings.create({
+            model: EMBED_MODEL,
+            input: texts,
+          });
+          const ordered = Array<unknown>(texts.length).fill(null);
+          for (const item of response.data ?? []) {
+            if (item.index >= 0 && item.index < texts.length) {
+              ordered[item.index] = item.embedding;
+            }
+          }
+          const embeddings = ordered.filter((e) => e !== null);
+          const totalTokens = response.usage?.total_tokens ?? 0;
+          trackUsage({appId, userId: clientId, feature: "embed", model: EMBED_MODEL, promptTokens: totalTokens, completionTokens: 0}).catch(() => {});
+          res.json({result: embeddings, tokensUsed: totalTokens});
+        } catch (e) {
+          const err = e as Error;
+          functions.logger.error("[processAi] embed error", {msg: err.message, appId});
+          res.status(502).json({error: err.message ?? "Embed error"});
+        }
+        return;
+      }
+    }
+
     // ── Build messages ─────────────────────────────────────────────────────
     let messages: {role: "user" | "assistant" | "system"; content: string}[];
     try {
@@ -102,9 +143,7 @@ export const processAi = functions.https.onRequest(
       return;
     }
 
-    // ── Call OpenAI ────────────────────────────────────────────────────────
-    const openai = new OpenAI({apiKey});
-
+    // ── Chat completion ────────────────────────────────────────────────────
     try {
       const isJson = JSON_TASKS.has(task);
       const completion = await openai.chat.completions.create({
@@ -158,9 +197,7 @@ export const processAi = functions.https.onRequest(
         model: MODEL,
         promptTokens,
         completionTokens,
-      }).catch(() => {
-        /* non-fatal */
-      });
+      }).catch(() => {/* non-fatal */});
 
       res.json({result, tokensUsed: totalTokens});
     } catch (e) {

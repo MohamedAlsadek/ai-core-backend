@@ -7,7 +7,8 @@ export type TaskType =
   | "tags"
   | "chat"
   | "enhanceAll"
-  | "custom";
+  | "custom"
+  | "embed";
 
 interface Note {
   id?: number;
@@ -42,6 +43,7 @@ export interface TaskPayload {
   contextChunks?: ContextChunk[];
   systemPrompt?: string;
   userPrompt?: string;
+  texts?: string[]; // for embed task
 }
 
 function noteText(note: Note): string {
