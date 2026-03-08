@@ -1,50 +1,51 @@
 import * as functions from "firebase-functions/v2";
 import * as admin from "firebase-admin";
 import OpenAI from "openai";
+import {defineSecret} from "firebase-functions/params";
 import {buildMessages, TaskPayload} from "./prompts";
 import {trackUsage} from "../usage/tracker";
+import {verifyAuth} from "../auth";
+import {checkRateLimit, getClientId} from "../rate-limiter";
 
+const openaiKey = defineSecret("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 
-// Supported app IDs — add new apps here
-const ALLOWED_APP_IDS = new Set(["voicenote", "fitness", "journal", "default"]);
-
-// Tasks that return structured JSON
+// Tasks that return structured JSON from OpenAI
 const JSON_TASKS = new Set(["enhanceAll", "actions", "tags"]);
+
+// Allowed app IDs — add new apps here when onboarding them
+const ALLOWED_APP_IDS = new Set([
+  "voicenote",
+  "fitness",
+  "journal",
+  "default",
+]);
 
 export const processAi = functions.https.onRequest(
   {
-    secrets: ["OPENAI_API_KEY"],
+    secrets: [openaiKey],
     timeoutSeconds: 60,
     memory: "256MiB",
     cors: true,
+    invoker: "public",
   },
   async (req, res) => {
-    // ── Method check ────────────────────────────────────────────────────────
+    // ── Method ─────────────────────────────────────────────────────────────
     if (req.method !== "POST") {
       res.status(405).json({error: "Method not allowed"});
       return;
     }
 
-    // ── Auth: verify Firebase ID token ──────────────────────────────────────
-    const authHeader = req.headers["authorization"] ?? "";
-    const idToken = authHeader.startsWith("Bearer ")
-      ? authHeader.slice(7)
-      : null;
-
-    let userId = "anonymous";
-    if (idToken) {
-      try {
-        const decoded = await admin.auth().verifyIdToken(idToken);
-        userId = decoded.uid;
-      } catch {
-        res.status(401).json({error: "Invalid auth token"});
-        return;
-      }
+    // ── Parse body ──────────────────────────────────────────────────────────
+    let body: TaskPayload & {appId?: string};
+    try {
+      body =
+        typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
+    } catch {
+      res.status(400).json({error: "Invalid JSON body"});
+      return;
     }
 
-    // ── Parse body ──────────────────────────────────────────────────────────
-    const body = req.body as TaskPayload & {appId?: string};
     const {task, appId = "default"} = body;
 
     if (!task) {
@@ -57,10 +58,42 @@ export const processAi = functions.https.onRequest(
       return;
     }
 
-    // ── Device ID (for rate limiting later) ─────────────────────────────────
-    const deviceId = (req.headers["x-device-id"] as string) ?? "unknown";
+    // ── Auth ───────────────────────────────────────────────────────────────
+    const auth = await verifyAuth(req as Parameters<typeof verifyAuth>[0]);
+    if (!auth.uid) {
+      res
+        .status(401)
+        .json({error: auth.error ?? "Unauthorized", code: "UNAUTHORIZED"});
+      return;
+    }
 
-    // ── Build messages ──────────────────────────────────────────────────────
+    // ── Rate limit ─────────────────────────────────────────────────────────
+    const clientId = getClientId(
+      req as Parameters<typeof getClientId>[0],
+      auth.uid,
+    );
+    const {allowed, remaining} = await checkRateLimit(clientId, appId);
+    if (!allowed) {
+      res.status(429).json({
+        error: "Rate limit exceeded. Try again tomorrow.",
+        code: "RATE_LIMIT_EXCEEDED",
+      });
+      return;
+    }
+
+    // Expose remaining requests in headers
+    if (remaining >= 0) {
+      res.setHeader("X-RateLimit-Remaining", remaining);
+    }
+
+    // ── Validate API key ───────────────────────────────────────────────────
+    const apiKey = openaiKey.value().trim();
+    if (!apiKey) {
+      res.status(500).json({error: "OPENAI_API_KEY not configured"});
+      return;
+    }
+
+    // ── Build messages ─────────────────────────────────────────────────────
     let messages: {role: "user" | "assistant" | "system"; content: string}[];
     try {
       messages = buildMessages(body);
@@ -69,12 +102,11 @@ export const processAi = functions.https.onRequest(
       return;
     }
 
-    // ── Call OpenAI ─────────────────────────────────────────────────────────
-    const openai = new OpenAI({apiKey: process.env.OPENAI_API_KEY});
+    // ── Call OpenAI ────────────────────────────────────────────────────────
+    const openai = new OpenAI({apiKey});
 
     try {
       const isJson = JSON_TASKS.has(task);
-
       const completion = await openai.chat.completions.create({
         model: MODEL,
         messages,
@@ -86,27 +118,30 @@ export const processAi = functions.https.onRequest(
       const raw = completion.choices[0]?.message?.content ?? "";
       const promptTokens = completion.usage?.prompt_tokens ?? 0;
       const completionTokens = completion.usage?.completion_tokens ?? 0;
+      const totalTokens = promptTokens + completionTokens;
 
       // ── Parse result ────────────────────────────────────────────────────
       let result: unknown;
 
       if (task === "enhanceAll") {
         try {
-          const parsed = JSON.parse(raw);
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
           result = {
-            title: (parsed.title as string | undefined ?? "").trim(),
-            summary: (parsed.summary as string | undefined ?? "").trim(),
-            actions: Array.isArray(parsed.actions)
-              ? parsed.actions.map(String)
+            title: ((parsed["title"] as string | undefined) ?? "").trim(),
+            summary: ((parsed["summary"] as string | undefined) ?? "").trim(),
+            actions: Array.isArray(parsed["actions"])
+              ? (parsed["actions"] as unknown[]).map(String)
               : [],
-            tags: Array.isArray(parsed.tags) ? parsed.tags.map(String) : [],
+            tags: Array.isArray(parsed["tags"])
+              ? (parsed["tags"] as unknown[]).map(String)
+              : [],
           };
         } catch {
-          result = {title: "", summary: raw, actions: [], tags: []};
+          result = {title: "", summary: raw.trim(), actions: [], tags: []};
         }
       } else if (task === "actions" || task === "tags") {
         try {
-          const parsed = JSON.parse(raw);
+          const parsed = JSON.parse(raw) as unknown;
           result = Array.isArray(parsed) ? parsed.map(String) : [];
         } catch {
           result = [];
@@ -115,21 +150,44 @@ export const processAi = functions.https.onRequest(
         result = raw.trim();
       }
 
-      // ── Track usage (fire-and-forget, don't block response) ─────────────
+      // ── Track usage (fire-and-forget) ────────────────────────────────────
       trackUsage({
         appId,
-        userId: userId === "anonymous" ? deviceId : userId,
+        userId: clientId,
         feature: task,
         model: MODEL,
         promptTokens,
         completionTokens,
-      }).catch(() => {/* non-fatal */});
+      }).catch(() => {
+        /* non-fatal */
+      });
 
-      res.json({result, tokensUsed: promptTokens + completionTokens});
+      res.json({result, tokensUsed: totalTokens});
     } catch (e) {
-      const msg = (e as Error).message ?? "OpenAI error";
-      functions.logger.error("[processAi] OpenAI error", {msg, task, appId});
-      res.status(502).json({error: msg});
+      const err = e as Error & {
+        status?: number;
+        code?: string;
+        cause?: unknown;
+      };
+      functions.logger.error("[processAi] OpenAI error", {
+        msg: err.message,
+        cause: String(err.cause ?? ""),
+        status: err.status,
+        code: err.code,
+        task,
+        appId,
+      });
+      res.status(502).json({error: err.message ?? "OpenAI error"});
     }
   },
 );
+
+// ── Helper: verify Firestore is reachable (called by health check) ────────────
+export async function firestoreReachable(): Promise<boolean> {
+  try {
+    await admin.firestore().collection("_health").limit(1).get();
+    return true;
+  } catch {
+    return false;
+  }
+}
