@@ -35,10 +35,12 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.trackUsage = trackUsage;
 const admin = __importStar(require("firebase-admin"));
-/** Approximate cost per 1K tokens (input/output) for GPT-4o-mini */
+/** Approximate cost per 1K tokens (input/output) */
 const COST_PER_1K = {
     "gpt-4o-mini": { input: 0.00015, output: 0.0006 },
     "gpt-4o": { input: 0.005, output: 0.015 },
+    "text-embedding-3-small": { input: 0.00002, output: 0 },
+    "text-embedding-3-large": { input: 0.00013, output: 0 },
 };
 function estimateCost(model, promptTokens, completionTokens) {
     var _a;
@@ -62,23 +64,24 @@ async function trackUsage(opts) {
         costUsd,
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
     };
-    // Store per-request log under: usage/{appId}/requests/{auto-id}
-    await db
+    const batch = db.batch();
+    const requestRef = db
         .collection("usage")
         .doc(appId)
         .collection("requests")
-        .add(record);
-    // Update running totals (atomic increment) under: usage/{appId}/totals/all-time
-    await db
+        .doc();
+    batch.set(requestRef, record);
+    const totalsRef = db
         .collection("usage")
         .doc(appId)
         .collection("totals")
-        .doc("all-time")
-        .set({
+        .doc("all-time");
+    batch.set(totalsRef, {
         totalRequests: admin.firestore.FieldValue.increment(1),
         totalTokens: admin.firestore.FieldValue.increment(totalTokens),
         totalCostUsd: admin.firestore.FieldValue.increment(costUsd),
         lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
+    await batch.commit();
 }
 //# sourceMappingURL=tracker.js.map

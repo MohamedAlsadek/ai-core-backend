@@ -182,7 +182,7 @@ Return only valid JSON. No markdown, no explanation.`,
         {
           role: "system",
           content:
-            "Format this transcript as a meeting report. Include: Attendees, Key decisions, Action items, Next steps. Use clear headings. Return plain text only.",
+            "Format this transcript as a meeting report. Use these sections where applicable: Attendees, Key Decisions, Action Items, Next Steps. Only include sections you can fill from the transcript — never use placeholders like \"[Insert Date]\" or \"[Insert Name]\". Omit any section that has no relevant content. Do not repeat the title. Use clear headings. Return plain text only.",
         },
         {role: "user", content: text},
       ];

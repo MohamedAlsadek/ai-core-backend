@@ -9,7 +9,7 @@ function noteText(note) {
     return title ? `Title: ${title}\n\n${transcript}` : transcript;
 }
 function buildMessages(payload) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e, _f;
     const { task, note, existingTags, messages, contextNotes, contextChunks } = payload;
     switch (task) {
         case "summarize": {
@@ -110,19 +110,24 @@ Return only valid JSON. No markdown, no explanation.`,
             return [
                 {
                     role: "system",
-                    content: "Format this transcript as a meeting report. Include: Attendees, Key decisions, Action items, Next steps. Use clear headings. Return plain text only.",
+                    content: "Format this transcript as a meeting report. Use these sections where applicable: Attendees, Key Decisions, Action Items, Next Steps. Only include sections you can fill from the transcript — never use placeholders like \"[Insert Date]\" or \"[Insert Name]\". Omit any section that has no relevant content. Do not repeat the title. Use clear headings. Return plain text only.",
                 },
                 { role: "user", content: text },
             ];
         }
         case "cleanupTranscript": {
-            const text = noteText(note);
+            let transcript = (_c = note.transcription) !== null && _c !== void 0 ? _c : "";
+            // Strip any leading "Title:" line that may have been saved from a previous run
+            const firstLine = (_e = (_d = transcript.trimStart().split("\n")[0]) === null || _d === void 0 ? void 0 : _d.trim()) !== null && _e !== void 0 ? _e : "";
+            if (firstLine.startsWith("Title:") || firstLine.startsWith("**Title:**")) {
+                transcript = transcript.trimStart().split("\n").slice(1).join("\n").trim();
+            }
             return [
                 {
                     role: "system",
-                    content: "Fix typos, punctuation, and line breaks in this transcript. Preserve meaning. Output the clean transcript only, no commentary.",
+                    content: "Fix typos, punctuation, and line breaks in this transcript. Preserve meaning. Do not add any title, header, or prefix. Output only the transcript text with fixes applied, no commentary.",
                 },
-                { role: "user", content: text },
+                { role: "user", content: transcript },
             ];
         }
         case "draftEmail": {
@@ -147,7 +152,7 @@ Return only valid JSON. No markdown, no explanation.`,
         }
         case "translate": {
             const text = noteText(note);
-            const lang = (_c = payload.targetLang) !== null && _c !== void 0 ? _c : "Spanish";
+            const lang = (_f = payload.targetLang) !== null && _f !== void 0 ? _f : "Spanish";
             return [
                 {
                     role: "system",

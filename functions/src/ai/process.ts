@@ -87,6 +87,22 @@ export const processAi = functions.https.onRequest(
       return;
     }
 
+    const TASKS_REQUIRING_NOTE = new Set<TaskType>([
+      "summarize", "title", "actions", "tags", "enhanceAll",
+      "mainPoints", "meetingReport", "cleanupTranscript",
+      "draftEmail", "draftBlog", "translate", "draftTweet",
+    ]);
+    if (TASKS_REQUIRING_NOTE.has(task) && (!body.note || !body.note.transcription)) {
+      res.status(400).json({error: `Task "${task}" requires a note with transcription`});
+      return;
+    }
+
+    const MAX_INPUT_CHARS = 50_000;
+    if (body.note?.transcription && body.note.transcription.length > MAX_INPUT_CHARS) {
+      res.status(400).json({error: `Transcript too long (${body.note.transcription.length} chars). Max ${MAX_INPUT_CHARS}.`});
+      return;
+    }
+
     // ── Auth ───────────────────────────────────────────────────────────────
     // Tokens from cross-project apps (e.g. voicenote using ai-voice-note-29b96)
     // can't be verified here — fall back to device-ID rate limiting instead.
@@ -137,13 +153,12 @@ export const processAi = functions.https.onRequest(
             model: EMBED_MODEL,
             input: texts,
           });
-          const ordered = Array<unknown>(texts.length).fill(null);
+          const embeddings = Array<number[] | null>(texts.length).fill(null);
           for (const item of response.data ?? []) {
             if (item.index >= 0 && item.index < texts.length) {
-              ordered[item.index] = item.embedding;
+              embeddings[item.index] = item.embedding;
             }
           }
-          const embeddings = ordered.filter((e) => e !== null);
           const totalTokens = response.usage?.total_tokens ?? 0;
           trackUsage({appId, userId: clientId, feature: "embed", model: EMBED_MODEL, promptTokens: totalTokens, completionTokens: 0}).catch(() => {});
           res.json({result: embeddings, tokensUsed: totalTokens});

@@ -12,10 +12,12 @@ interface UsageRecord {
   timestamp: admin.firestore.FieldValue;
 }
 
-/** Approximate cost per 1K tokens (input/output) for GPT-4o-mini */
-const COST_PER_1K = {
+/** Approximate cost per 1K tokens (input/output) */
+const COST_PER_1K: Record<string, {input: number; output: number}> = {
   "gpt-4o-mini": {input: 0.00015, output: 0.0006},
   "gpt-4o": {input: 0.005, output: 0.015},
+  "text-embedding-3-small": {input: 0.00002, output: 0},
+  "text-embedding-3-large": {input: 0.00013, output: 0},
 };
 
 function estimateCost(
@@ -23,9 +25,7 @@ function estimateCost(
   promptTokens: number,
   completionTokens: number,
 ): number {
-  const rates =
-    COST_PER_1K[model as keyof typeof COST_PER_1K] ??
-    COST_PER_1K["gpt-4o-mini"];
+  const rates = COST_PER_1K[model] ?? COST_PER_1K["gpt-4o-mini"];
   return (
     (promptTokens / 1000) * rates.input +
     (completionTokens / 1000) * rates.output
@@ -57,26 +57,30 @@ export async function trackUsage(opts: {
     timestamp: admin.firestore.FieldValue.serverTimestamp(),
   };
 
-  // Store per-request log under: usage/{appId}/requests/{auto-id}
-  await db
+  const batch = db.batch();
+
+  const requestRef = db
     .collection("usage")
     .doc(appId)
     .collection("requests")
-    .add(record);
+    .doc();
+  batch.set(requestRef, record);
 
-  // Update running totals (atomic increment) under: usage/{appId}/totals/all-time
-  await db
+  const totalsRef = db
     .collection("usage")
     .doc(appId)
     .collection("totals")
-    .doc("all-time")
-    .set(
-      {
-        totalRequests: admin.firestore.FieldValue.increment(1),
-        totalTokens: admin.firestore.FieldValue.increment(totalTokens),
-        totalCostUsd: admin.firestore.FieldValue.increment(costUsd),
-        lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      {merge: true},
-    );
+    .doc("all-time");
+  batch.set(
+    totalsRef,
+    {
+      totalRequests: admin.firestore.FieldValue.increment(1),
+      totalTokens: admin.firestore.FieldValue.increment(totalTokens),
+      totalCostUsd: admin.firestore.FieldValue.increment(costUsd),
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    {merge: true},
+  );
+
+  await batch.commit();
 }

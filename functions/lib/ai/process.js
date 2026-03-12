@@ -51,6 +51,16 @@ const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
 const JSON_TASKS = new Set(["enhanceAll"]);
+/** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
+function stripLeadingTitle(text) {
+    var _a, _b;
+    const trimmed = text.trimStart();
+    const firstLine = (_b = (_a = trimmed.split("\n")[0]) === null || _a === void 0 ? void 0 : _a.trim()) !== null && _b !== void 0 ? _b : "";
+    if (firstLine.startsWith("Title:") || firstLine.startsWith("**Title:**")) {
+        return trimmed.split("\n").slice(1).join("\n").trim();
+    }
+    return text.trim();
+}
 /** Extract JSON array from raw text (handles markdown code blocks or extra text). */
 function extractJsonArray(raw) {
     const trimmed = raw.trim();
@@ -83,7 +93,7 @@ exports.processAi = functions.https.onRequest({
     cors: true,
     invoker: "public",
 }, async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t;
     // ── Method ─────────────────────────────────────────────────────────────
     if (req.method !== "POST") {
         res.status(405).json({ error: "Method not allowed" });
@@ -95,7 +105,7 @@ exports.processAi = functions.https.onRequest({
         body =
             typeof req.body === "string" ? JSON.parse(req.body) : (_a = req.body) !== null && _a !== void 0 ? _a : {};
     }
-    catch (_t) {
+    catch (_u) {
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
@@ -106,6 +116,20 @@ exports.processAi = functions.https.onRequest({
     }
     if (!ALLOWED_APP_IDS.has(appId)) {
         res.status(400).json({ error: `Unknown appId: ${appId}` });
+        return;
+    }
+    const TASKS_REQUIRING_NOTE = new Set([
+        "summarize", "title", "actions", "tags", "enhanceAll",
+        "mainPoints", "meetingReport", "cleanupTranscript",
+        "draftEmail", "draftBlog", "translate", "draftTweet",
+    ]);
+    if (TASKS_REQUIRING_NOTE.has(task) && (!body.note || !body.note.transcription)) {
+        res.status(400).json({ error: `Task "${task}" requires a note with transcription` });
+        return;
+    }
+    const MAX_INPUT_CHARS = 50000;
+    if (((_b = body.note) === null || _b === void 0 ? void 0 : _b.transcription) && body.note.transcription.length > MAX_INPUT_CHARS) {
+        res.status(400).json({ error: `Transcript too long (${body.note.transcription.length} chars). Max ${MAX_INPUT_CHARS}.` });
         return;
     }
     // ── Auth ───────────────────────────────────────────────────────────────
@@ -136,7 +160,7 @@ exports.processAi = functions.https.onRequest({
     // ── Embed task (separate path) ─────────────────────────────────────────
     if (NON_CHAT_TASKS.has(task)) {
         if (task === "embed") {
-            const texts = (_b = body.texts) !== null && _b !== void 0 ? _b : [];
+            const texts = (_c = body.texts) !== null && _c !== void 0 ? _c : [];
             if (!Array.isArray(texts) || texts.length === 0) {
                 res.status(400).json({ error: "embed task requires a non-empty texts array" });
                 return;
@@ -150,21 +174,20 @@ exports.processAi = functions.https.onRequest({
                     model: EMBED_MODEL,
                     input: texts,
                 });
-                const ordered = Array(texts.length).fill(null);
-                for (const item of (_c = response.data) !== null && _c !== void 0 ? _c : []) {
+                const embeddings = Array(texts.length).fill(null);
+                for (const item of (_d = response.data) !== null && _d !== void 0 ? _d : []) {
                     if (item.index >= 0 && item.index < texts.length) {
-                        ordered[item.index] = item.embedding;
+                        embeddings[item.index] = item.embedding;
                     }
                 }
-                const embeddings = ordered.filter((e) => e !== null);
-                const totalTokens = (_e = (_d = response.usage) === null || _d === void 0 ? void 0 : _d.total_tokens) !== null && _e !== void 0 ? _e : 0;
+                const totalTokens = (_f = (_e = response.usage) === null || _e === void 0 ? void 0 : _e.total_tokens) !== null && _f !== void 0 ? _f : 0;
                 (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "embed", model: EMBED_MODEL, promptTokens: totalTokens, completionTokens: 0 }).catch(() => { });
                 res.json({ result: embeddings, tokensUsed: totalTokens });
             }
             catch (e) {
                 const err = e;
                 functions.logger.error("[processAi] embed error", { msg: err.message, appId });
-                res.status(502).json({ error: (_f = err.message) !== null && _f !== void 0 ? _f : "Embed error" });
+                res.status(502).json({ error: (_g = err.message) !== null && _g !== void 0 ? _g : "Embed error" });
             }
             return;
         }
@@ -182,9 +205,9 @@ exports.processAi = functions.https.onRequest({
     try {
         const isJson = JSON_TASKS.has(task);
         const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
-        const raw = (_j = (_h = (_g = completion.choices[0]) === null || _g === void 0 ? void 0 : _g.message) === null || _h === void 0 ? void 0 : _h.content) !== null && _j !== void 0 ? _j : "";
-        const promptTokens = (_l = (_k = completion.usage) === null || _k === void 0 ? void 0 : _k.prompt_tokens) !== null && _l !== void 0 ? _l : 0;
-        const completionTokens = (_o = (_m = completion.usage) === null || _m === void 0 ? void 0 : _m.completion_tokens) !== null && _o !== void 0 ? _o : 0;
+        const raw = (_k = (_j = (_h = completion.choices[0]) === null || _h === void 0 ? void 0 : _h.message) === null || _j === void 0 ? void 0 : _j.content) !== null && _k !== void 0 ? _k : "";
+        const promptTokens = (_m = (_l = completion.usage) === null || _l === void 0 ? void 0 : _l.prompt_tokens) !== null && _m !== void 0 ? _m : 0;
+        const completionTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.completion_tokens) !== null && _p !== void 0 ? _p : 0;
         const totalTokens = promptTokens + completionTokens;
         // ── Parse result ────────────────────────────────────────────────────
         let result;
@@ -192,8 +215,8 @@ exports.processAi = functions.https.onRequest({
             try {
                 const parsed = JSON.parse(raw);
                 result = {
-                    title: ((_p = parsed["title"]) !== null && _p !== void 0 ? _p : "").trim(),
-                    summary: ((_q = parsed["summary"]) !== null && _q !== void 0 ? _q : "").trim(),
+                    title: ((_q = parsed["title"]) !== null && _q !== void 0 ? _q : "").trim(),
+                    summary: ((_r = parsed["summary"]) !== null && _r !== void 0 ? _r : "").trim(),
                     actions: Array.isArray(parsed["actions"])
                         ? parsed["actions"].map(String)
                         : [],
@@ -202,12 +225,15 @@ exports.processAi = functions.https.onRequest({
                         : [],
                 };
             }
-            catch (_u) {
+            catch (_v) {
                 result = { title: "", summary: raw.trim(), actions: [], tags: [] };
             }
         }
         else if (task === "actions" || task === "tags") {
             result = extractJsonArray(raw);
+        }
+        else if (task === "cleanupTranscript") {
+            result = stripLeadingTitle(raw.trim());
         }
         else {
             result = raw.trim();
@@ -227,13 +253,13 @@ exports.processAi = functions.https.onRequest({
         const err = e;
         functions.logger.error("[processAi] OpenAI error", {
             msg: err.message,
-            cause: String((_r = err.cause) !== null && _r !== void 0 ? _r : ""),
+            cause: String((_s = err.cause) !== null && _s !== void 0 ? _s : ""),
             status: err.status,
             code: err.code,
             task,
             appId,
         });
-        res.status(502).json({ error: (_s = err.message) !== null && _s !== void 0 ? _s : "OpenAI error" });
+        res.status(502).json({ error: (_t = err.message) !== null && _t !== void 0 ? _t : "OpenAI error" });
     }
 });
 // ── Helper: verify Firestore is reachable (called by health check) ────────────
