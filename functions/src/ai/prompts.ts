@@ -189,14 +189,19 @@ Return only valid JSON. No markdown, no explanation.`,
     }
 
     case "cleanupTranscript": {
-      const text = noteText(note!);
+      let transcript = note!.transcription ?? "";
+      // Strip any leading "Title:" line that may have been saved from a previous run
+      const firstLine = transcript.trimStart().split("\n")[0]?.trim() ?? "";
+      if (firstLine.startsWith("Title:") || firstLine.startsWith("**Title:**")) {
+        transcript = transcript.trimStart().split("\n").slice(1).join("\n").trim();
+      }
       return [
         {
           role: "system",
           content:
-            "Fix typos, punctuation, and line breaks in this transcript. Preserve meaning. Output the clean transcript only, no commentary.",
+            "Fix typos, punctuation, and line breaks in this transcript. Preserve meaning. Do not add any title, header, or prefix. Output only the transcript text with fixes applied, no commentary.",
         },
-        {role: "user", content: text},
+        {role: "user", content: transcript},
       ];
     }
 

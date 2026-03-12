@@ -14,6 +14,16 @@ const EMBED_MODEL = "text-embedding-3-small";
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
 const JSON_TASKS = new Set<TaskType>(["enhanceAll"]);
 
+/** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
+function stripLeadingTitle(text: string): string {
+  const trimmed = text.trimStart();
+  const firstLine = trimmed.split("\n")[0]?.trim() ?? "";
+  if (firstLine.startsWith("Title:") || firstLine.startsWith("**Title:**")) {
+    return trimmed.split("\n").slice(1).join("\n").trim();
+  }
+  return text.trim();
+}
+
 /** Extract JSON array from raw text (handles markdown code blocks or extra text). */
 function extractJsonArray(raw: string): string[] {
   const trimmed = raw.trim();
@@ -192,6 +202,8 @@ export const processAi = functions.https.onRequest(
         }
       } else if (task === "actions" || task === "tags") {
         result = extractJsonArray(raw);
+      } else if (task === "cleanupTranscript") {
+        result = stripLeadingTitle(raw.trim());
       } else {
         result = raw.trim();
       }
