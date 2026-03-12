@@ -11,8 +11,24 @@ const openaiKey = defineSecret("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 
-// Tasks that return structured JSON from OpenAI
-const JSON_TASKS = new Set<TaskType>(["enhanceAll", "actions", "tags"]);
+// Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
+const JSON_TASKS = new Set<TaskType>(["enhanceAll"]);
+
+/** Extract JSON array from raw text (handles markdown code blocks or extra text). */
+function extractJsonArray(raw: string): string[] {
+  const trimmed = raw.trim();
+  const start = trimmed.indexOf("[");
+  const end = trimmed.lastIndexOf("]");
+  if (start === -1 || end === -1 || end <= start) return [];
+  const slice = trimmed.substring(start, end + 1);
+  try {
+    const parsed = JSON.parse(slice) as unknown;
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 // Tasks that don't go through the chat completions path
 const NON_CHAT_TASKS = new Set<TaskType>(["embed"]);
 
@@ -175,12 +191,7 @@ export const processAi = functions.https.onRequest(
           result = {title: "", summary: raw.trim(), actions: [], tags: []};
         }
       } else if (task === "actions" || task === "tags") {
-        try {
-          const parsed = JSON.parse(raw) as unknown;
-          result = Array.isArray(parsed) ? parsed.map(String) : [];
-        } catch {
-          result = [];
-        }
+        result = extractJsonArray(raw);
       } else {
         result = raw.trim();
       }

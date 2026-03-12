@@ -49,8 +49,24 @@ const rate_limiter_1 = require("../rate-limiter");
 const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
-// Tasks that return structured JSON from OpenAI
-const JSON_TASKS = new Set(["enhanceAll", "actions", "tags"]);
+// Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
+const JSON_TASKS = new Set(["enhanceAll"]);
+/** Extract JSON array from raw text (handles markdown code blocks or extra text). */
+function extractJsonArray(raw) {
+    const trimmed = raw.trim();
+    const start = trimmed.indexOf("[");
+    const end = trimmed.lastIndexOf("]");
+    if (start === -1 || end === -1 || end <= start)
+        return [];
+    const slice = trimmed.substring(start, end + 1);
+    try {
+        const parsed = JSON.parse(slice);
+        return Array.isArray(parsed) ? parsed.map(String) : [];
+    }
+    catch (_a) {
+        return [];
+    }
+}
 // Tasks that don't go through the chat completions path
 const NON_CHAT_TASKS = new Set(["embed"]);
 // Allowed app IDs — add new apps here when onboarding them
@@ -191,13 +207,7 @@ exports.processAi = functions.https.onRequest({
             }
         }
         else if (task === "actions" || task === "tags") {
-            try {
-                const parsed = JSON.parse(raw);
-                result = Array.isArray(parsed) ? parsed.map(String) : [];
-            }
-            catch (_v) {
-                result = [];
-            }
+            result = extractJsonArray(raw);
         }
         else {
             result = raw.trim();

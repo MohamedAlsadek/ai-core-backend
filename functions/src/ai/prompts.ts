@@ -8,7 +8,14 @@ export type TaskType =
   | "chat"
   | "enhanceAll"
   | "custom"
-  | "embed";
+  | "embed"
+  | "mainPoints"
+  | "meetingReport"
+  | "cleanupTranscript"
+  | "draftEmail"
+  | "draftBlog"
+  | "translate"
+  | "draftTweet";
 
 interface Note {
   id?: number;
@@ -38,6 +45,7 @@ export interface TaskPayload {
   task: TaskType;
   note?: Note;
   existingTags?: string[];
+  targetLang?: string;
   messages?: Message[];
   contextNotes?: Note[];
   contextChunks?: ContextChunk[];
@@ -89,7 +97,7 @@ export function buildMessages(
         {
           role: "system",
           content:
-            'Extract action items from this voice note. Return a JSON array of strings. Example: ["Call John", "Review document"]. Return only the JSON array.',
+            'Extract actionable to-do items from this voice note. Return a JSON array of strings. Example: ["Call John", "Review document"]. Return only the JSON array. If none, return [].',
         },
         {role: "user", content: text},
       ];
@@ -153,6 +161,90 @@ Return only valid JSON. No markdown, no explanation.`,
       return [
         {role: "system", content: payload.systemPrompt ?? "You are a helpful assistant."},
         {role: "user", content: payload.userPrompt ?? ""},
+      ];
+    }
+
+    case "mainPoints": {
+      const text = noteText(note!);
+      return [
+        {
+          role: "system",
+          content:
+            "Extract 3-5 bullet points from this transcript. One line each. Direct and factual. Return plain text only.",
+        },
+        {role: "user", content: text},
+      ];
+    }
+
+    case "meetingReport": {
+      const text = noteText(note!);
+      return [
+        {
+          role: "system",
+          content:
+            "Format this transcript as a meeting report. Include: Attendees, Key decisions, Action items, Next steps. Use clear headings. Return plain text only.",
+        },
+        {role: "user", content: text},
+      ];
+    }
+
+    case "cleanupTranscript": {
+      const text = noteText(note!);
+      return [
+        {
+          role: "system",
+          content:
+            "Fix typos, punctuation, and line breaks in this transcript. Preserve meaning. Output the clean transcript only, no commentary.",
+        },
+        {role: "user", content: text},
+      ];
+    }
+
+    case "draftEmail": {
+      const text = noteText(note!);
+      return [
+        {
+          role: "system",
+          content:
+            "Draft a professional email summarizing this content. Include Subject line and body. Concise and clear.",
+        },
+        {role: "user", content: text},
+      ];
+    }
+
+    case "draftBlog": {
+      const text = noteText(note!);
+      return [
+        {
+          role: "system",
+          content:
+            "Draft a short blog post (2-3 paragraphs) from this content. Engaging and readable.",
+        },
+        {role: "user", content: text},
+      ];
+    }
+
+    case "translate": {
+      const text = noteText(note!);
+      const lang = payload.targetLang ?? "Spanish";
+      return [
+        {
+          role: "system",
+          content: `Translate this transcript to ${lang}. Preserve tone and structure. Output the translation only.`,
+        },
+        {role: "user", content: text},
+      ];
+    }
+
+    case "draftTweet": {
+      const text = noteText(note!);
+      return [
+        {
+          role: "system",
+          content:
+            "Draft a tweet (max 280 characters) summarizing this content. Engaging and concise.",
+        },
+        {role: "user", content: text},
       ];
     }
 
