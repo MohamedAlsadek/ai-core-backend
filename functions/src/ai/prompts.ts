@@ -150,8 +150,8 @@ Return only valid JSON. No markdown, no explanation.`,
       const systemMsg: Message = {
         role: "system",
         content: context
-          ? `You are a helpful AI assistant for a voice notes app. Use the following notes as context to answer the user's question. Be concise and accurate.\n\n---\n${context}\n---`
-          : "You are a helpful AI assistant for a voice notes app. Be concise and accurate.",
+          ? `You are a voice note assistant. Answer the user's question using ONLY the context from their notes below. Do NOT use your general knowledge. If the notes don't contain enough information to answer, say: "I couldn't find enough information about that in your notes." Be concise and direct.\n\n--- User's Notes ---\n${context}\n---`
+          : `You are a voice note assistant. The user asked a question but no relevant notes were found. Respond with: "I couldn't find anything about that in your notes." Do NOT answer from your general knowledge.`,
       };
 
       return [systemMsg, ...(messages ?? [])];
