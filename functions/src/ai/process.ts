@@ -12,7 +12,7 @@ const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
-const JSON_TASKS = new Set<TaskType>(["enhanceAll"]);
+const JSON_TASKS = new Set<TaskType>(["enhanceAll", "cleanupAndTitle"]);
 
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
 function stripLeadingTitle(text: string): string {
@@ -91,6 +91,7 @@ export const processAi = functions.https.onRequest(
       "summarize", "title", "actions", "tags", "enhanceAll",
       "mainPoints", "meetingReport", "cleanupTranscript",
       "draftEmail", "draftBlog", "translate", "draftTweet",
+      "cleanupAndTitle",
     ]);
     if (TASKS_REQUIRING_NOTE.has(task) && (!body.note || !body.note.transcription)) {
       res.status(400).json({error: `Task "${task}" requires a note with transcription`});
@@ -187,7 +188,7 @@ export const processAi = functions.https.onRequest(
         model: MODEL,
         messages,
         temperature: 0.3,
-        max_tokens: task === "chat" ? 1024 : 512,
+        max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : 512,
         ...(isJson ? {response_format: {type: "json_object"}} : {}),
       });
 
@@ -214,6 +215,16 @@ export const processAi = functions.https.onRequest(
           };
         } catch {
           result = {title: "", summary: raw.trim(), actions: [], tags: []};
+        }
+      } else if (task === "cleanupAndTitle") {
+        try {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          result = {
+            title: ((parsed["title"] as string | undefined) ?? "").trim(),
+            cleanTranscript: ((parsed["cleanTranscript"] as string | undefined) ?? "").trim(),
+          };
+        } catch {
+          result = {title: "", cleanTranscript: raw.trim()};
         }
       } else if (task === "actions" || task === "tags") {
         result = extractJsonArray(raw);

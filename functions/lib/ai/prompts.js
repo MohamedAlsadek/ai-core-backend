@@ -9,7 +9,7 @@ function noteText(note) {
     return title ? `Title: ${title}\n\n${transcript}` : transcript;
 }
 function buildMessages(payload) {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g;
     const { task, note, existingTags, messages, contextNotes, contextChunks } = payload;
     switch (task) {
         case "summarize": {
@@ -169,6 +169,41 @@ Return only valid JSON. No markdown, no explanation.`,
                     content: "Draft a tweet (max 280 characters) summarizing this content. Engaging and concise.",
                 },
                 { role: "user", content: text },
+            ];
+        }
+        case "cleanupAndTitle": {
+            const transcript = (_g = note.transcription) !== null && _g !== void 0 ? _g : "";
+            return [
+                {
+                    role: "system",
+                    content: `You are a minimal transcript editor for a voice notes app. You have two jobs:
+
+1. LIGHTLY CLEAN the transcript — fix only what the speech-to-text engine got wrong.
+2. GENERATE a short, descriptive title (max 8 words) from the content.
+
+CLEANUP RULES — BE CONSERVATIVE:
+- Add proper punctuation and capitalization. This is your primary job.
+- Fix obvious STT misrecognitions where context makes the correct word clear (e.g., "won too free" → "one two three", "their" vs "there").
+- Fix garbled or broken words that are clearly STT artifacts, not real speech.
+- If an entire segment is garbled beyond recognition, replace with [inaudible]. Do NOT guess.
+- NEVER remove words the user actually said. If they said "test test test let's go", keep it exactly.
+- NEVER remove filler words (um, uh, like, you know). The user said them — keep them.
+- NEVER remove stutters or repetitions. You cannot know if the user repeated intentionally.
+- Only fix hallucination loops that are CLEARLY STT artifacts: the exact same long phrase (5+ words) repeating 3+ times in a row with no variation. Short repeated words or phrases are likely real speech — keep them.
+- NEVER add, rephrase, or rearrange words. NEVER infer meaning.
+- NEVER change names, numbers, dates, or technical terms unless the STT error is obvious from context.
+- Do NOT summarize. Preserve full length and every word the user spoke.
+- Add paragraph breaks only at clear long pauses or topic shifts.
+- When in doubt, keep the original text unchanged.
+
+TITLE RULES:
+- Max 8 words, no quotes, no trailing punctuation.
+- Descriptive of the main topic, not the first few words.
+
+Return ONLY valid JSON, no markdown, no code blocks:
+{"title": "...", "cleanTranscript": "..."}`,
+                },
+                { role: "user", content: transcript },
             ];
         }
         default:

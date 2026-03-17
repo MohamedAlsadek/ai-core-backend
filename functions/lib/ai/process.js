@@ -50,7 +50,7 @@ const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
-const JSON_TASKS = new Set(["enhanceAll"]);
+const JSON_TASKS = new Set(["enhanceAll", "cleanupAndTitle"]);
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
 function stripLeadingTitle(text) {
     var _a, _b;
@@ -93,7 +93,7 @@ exports.processAi = functions.https.onRequest({
     cors: true,
     invoker: "public",
 }, async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v;
     // ── Method ─────────────────────────────────────────────────────────────
     if (req.method !== "POST") {
         res.status(405).json({ error: "Method not allowed" });
@@ -105,7 +105,7 @@ exports.processAi = functions.https.onRequest({
         body =
             typeof req.body === "string" ? JSON.parse(req.body) : (_a = req.body) !== null && _a !== void 0 ? _a : {};
     }
-    catch (_u) {
+    catch (_w) {
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
@@ -122,6 +122,7 @@ exports.processAi = functions.https.onRequest({
         "summarize", "title", "actions", "tags", "enhanceAll",
         "mainPoints", "meetingReport", "cleanupTranscript",
         "draftEmail", "draftBlog", "translate", "draftTweet",
+        "cleanupAndTitle",
     ]);
     if (TASKS_REQUIRING_NOTE.has(task) && (!body.note || !body.note.transcription)) {
         res.status(400).json({ error: `Task "${task}" requires a note with transcription` });
@@ -204,7 +205,7 @@ exports.processAi = functions.https.onRequest({
     // ── Chat completion ────────────────────────────────────────────────────
     try {
         const isJson = JSON_TASKS.has(task);
-        const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
+        const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
         const raw = (_k = (_j = (_h = completion.choices[0]) === null || _h === void 0 ? void 0 : _h.message) === null || _j === void 0 ? void 0 : _j.content) !== null && _k !== void 0 ? _k : "";
         const promptTokens = (_m = (_l = completion.usage) === null || _l === void 0 ? void 0 : _l.prompt_tokens) !== null && _m !== void 0 ? _m : 0;
         const completionTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.completion_tokens) !== null && _p !== void 0 ? _p : 0;
@@ -225,8 +226,20 @@ exports.processAi = functions.https.onRequest({
                         : [],
                 };
             }
-            catch (_v) {
+            catch (_x) {
                 result = { title: "", summary: raw.trim(), actions: [], tags: [] };
+            }
+        }
+        else if (task === "cleanupAndTitle") {
+            try {
+                const parsed = JSON.parse(raw);
+                result = {
+                    title: ((_s = parsed["title"]) !== null && _s !== void 0 ? _s : "").trim(),
+                    cleanTranscript: ((_t = parsed["cleanTranscript"]) !== null && _t !== void 0 ? _t : "").trim(),
+                };
+            }
+            catch (_y) {
+                result = { title: "", cleanTranscript: raw.trim() };
             }
         }
         else if (task === "actions" || task === "tags") {
@@ -253,13 +266,13 @@ exports.processAi = functions.https.onRequest({
         const err = e;
         functions.logger.error("[processAi] OpenAI error", {
             msg: err.message,
-            cause: String((_s = err.cause) !== null && _s !== void 0 ? _s : ""),
+            cause: String((_u = err.cause) !== null && _u !== void 0 ? _u : ""),
             status: err.status,
             code: err.code,
             task,
             appId,
         });
-        res.status(502).json({ error: (_t = err.message) !== null && _t !== void 0 ? _t : "OpenAI error" });
+        res.status(502).json({ error: (_v = err.message) !== null && _v !== void 0 ? _v : "OpenAI error" });
     }
 });
 // ── Helper: verify Firestore is reachable (called by health check) ────────────
