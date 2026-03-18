@@ -16,7 +16,8 @@ export type TaskType =
   | "draftBlog"
   | "translate"
   | "draftTweet"
-  | "cleanupAndTitle";
+  | "cleanupAndTitle"
+  | "moodAnalysis";
 
 interface Note {
   id?: number;
@@ -42,6 +43,14 @@ interface ContextChunk {
   };
 }
 
+interface MoodEntryData {
+  date: string;
+  moodType: string;
+  activities: string[];
+  note: string;
+  sleepHours: string | null;
+}
+
 export interface TaskPayload {
   task: TaskType;
   note?: Note;
@@ -53,6 +62,8 @@ export interface TaskPayload {
   systemPrompt?: string;
   userPrompt?: string;
   texts?: string[]; // for embed task
+  moodEntries?: MoodEntryData[]; // for moodAnalysis task
+  language?: string; // ISO language code for localized responses
 }
 
 function noteText(note: Note): string {
@@ -287,6 +298,49 @@ Return ONLY valid JSON, no markdown, no code blocks:
 {"title": "...", "cleanTranscript": "..."}`,
         },
         {role: "user", content: transcript},
+      ];
+    }
+
+    case "moodAnalysis": {
+      const entries = payload.moodEntries ?? [];
+      const lang = payload.language ?? "en";
+
+      const langMap: Record<string, string> = {
+        en: "English", es: "Spanish", fr: "French", de: "German",
+        zh: "Simplified Chinese", ar: "Arabic", pt: "Portuguese",
+        ja: "Japanese", nl: "Dutch", sv: "Swedish",
+      };
+      const langName = langMap[lang] ?? "English";
+      const langLine = `Respond entirely in ${langName}.`;
+
+      const system = `You are a mood-coaching AI. ${langLine}
+
+INPUT: A JSON array of mood entries, each with date, moodType (Very Happy / Happy / Neutral / Sad / Very Sad), activities, note, and sleepHours.
+
+OUTPUT: A JSON object with a single key "cards" containing an array of exactly 6 objects. Each object has:
+- "title": short emotionally engaging heading with 1-2 emojis (max 8 words)
+- "content": rich Markdown (## headers, **bold**, bullet points, emojis for tone). 4-6 sections per card, multiple paragraphs. Reference the user's actual data.
+- "cardColor": soft HEX background color suitable for dark text
+
+Markdown rules: only ## headers, **bold**, bullet points (• or -), plain text, line breaks, and emojis. No ###, no italic, no links, no code blocks, no tables.
+
+CARD ORDER:
+1. Mood Story & Patterns (#FFF3E0) — emotional arc, rhythm, timing patterns, undercurrents, reframes
+2. Energy & Activities (#E0F2F1) — energizing vs draining activities, combos, tailored suggestions
+3. Sleep & Recovery (#E8F5E8) — sleep rhythm, mood correlation, signs of debt or recovery, 1-2 tips
+4. Self-Care Alignment (#E8EAF6) — frequency, gaps, one routine or mindset shift
+5. Stress & Coping (#FFF0F5) — triggers from data, coping tools used, micro-strategies
+6. Strengths & Next Steps (#F0F8FF) — progress, strengths, 2 growth-oriented action steps
+
+Rules:
+- Ground every insight in the actual entries. Never use generic filler.
+- Each card must have 4-6 sections with multi-paragraph content.
+- Return ONLY valid JSON: {"cards": [...]}. No wrapping text or code fences.`;
+
+      const user = JSON.stringify({entries}, null, 0);
+      return [
+        {role: "system", content: system},
+        {role: "user", content: user},
       ];
     }
 

@@ -12,7 +12,7 @@ const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
-const JSON_TASKS = new Set<TaskType>(["enhanceAll", "cleanupAndTitle"]);
+const JSON_TASKS = new Set<TaskType>(["enhanceAll", "cleanupAndTitle", "moodAnalysis"]);
 
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
 function stripLeadingTitle(text: string): string {
@@ -47,6 +47,7 @@ const ALLOWED_APP_IDS = new Set([
   "voicenote",
   "fitness",
   "journal",
+  "moodtracker",
   "default",
 ]);
 
@@ -66,7 +67,7 @@ export const processAi = functions.https.onRequest(
     }
 
     // ── Parse body ──────────────────────────────────────────────────────────
-    let body: TaskPayload & {appId?: string};
+    let body: TaskPayload & {appId?: string; moodEntries?: Array<{date: string; moodType: string; activities: string[]; note: string; sleepHours: string | null}>};
     try {
       body =
         typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
@@ -95,6 +96,11 @@ export const processAi = functions.https.onRequest(
     ]);
     if (TASKS_REQUIRING_NOTE.has(task) && (!body.note || !body.note.transcription)) {
       res.status(400).json({error: `Task "${task}" requires a note with transcription`});
+      return;
+    }
+
+    if (task === "moodAnalysis" && (!body.moodEntries || body.moodEntries.length < 2)) {
+      res.status(400).json({error: "moodAnalysis requires at least 2 mood entries"});
       return;
     }
 
@@ -188,7 +194,7 @@ export const processAi = functions.https.onRequest(
         model: MODEL,
         messages,
         temperature: 0.3,
-        max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : 512,
+        max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : task === "moodAnalysis" ? 4096 : 512,
         ...(isJson ? {response_format: {type: "json_object"}} : {}),
       });
 
@@ -200,7 +206,15 @@ export const processAi = functions.https.onRequest(
       // ── Parse result ────────────────────────────────────────────────────
       let result: unknown;
 
-      if (task === "enhanceAll") {
+      if (task === "moodAnalysis") {
+        try {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const cards = parsed["cards"];
+          result = Array.isArray(cards) ? cards : [parsed];
+        } catch {
+          result = raw.trim();
+        }
+      } else if (task === "enhanceAll") {
         try {
           const parsed = JSON.parse(raw) as Record<string, unknown>;
           result = {

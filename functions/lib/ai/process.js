@@ -50,7 +50,7 @@ const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
-const JSON_TASKS = new Set(["enhanceAll", "cleanupAndTitle"]);
+const JSON_TASKS = new Set(["enhanceAll", "cleanupAndTitle", "moodAnalysis"]);
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
 function stripLeadingTitle(text) {
     var _a, _b;
@@ -84,6 +84,7 @@ const ALLOWED_APP_IDS = new Set([
     "voicenote",
     "fitness",
     "journal",
+    "moodtracker",
     "default",
 ]);
 exports.processAi = functions.https.onRequest({
@@ -126,6 +127,10 @@ exports.processAi = functions.https.onRequest({
     ]);
     if (TASKS_REQUIRING_NOTE.has(task) && (!body.note || !body.note.transcription)) {
         res.status(400).json({ error: `Task "${task}" requires a note with transcription` });
+        return;
+    }
+    if (task === "moodAnalysis" && (!body.moodEntries || body.moodEntries.length < 2)) {
+        res.status(400).json({ error: "moodAnalysis requires at least 2 mood entries" });
         return;
     }
     const MAX_INPUT_CHARS = 50000;
@@ -205,14 +210,24 @@ exports.processAi = functions.https.onRequest({
     // ── Chat completion ────────────────────────────────────────────────────
     try {
         const isJson = JSON_TASKS.has(task);
-        const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
+        const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : task === "moodAnalysis" ? 4096 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
         const raw = (_k = (_j = (_h = completion.choices[0]) === null || _h === void 0 ? void 0 : _h.message) === null || _j === void 0 ? void 0 : _j.content) !== null && _k !== void 0 ? _k : "";
         const promptTokens = (_m = (_l = completion.usage) === null || _l === void 0 ? void 0 : _l.prompt_tokens) !== null && _m !== void 0 ? _m : 0;
         const completionTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.completion_tokens) !== null && _p !== void 0 ? _p : 0;
         const totalTokens = promptTokens + completionTokens;
         // ── Parse result ────────────────────────────────────────────────────
         let result;
-        if (task === "enhanceAll") {
+        if (task === "moodAnalysis") {
+            try {
+                const parsed = JSON.parse(raw);
+                const cards = parsed["cards"];
+                result = Array.isArray(cards) ? cards : [parsed];
+            }
+            catch (_x) {
+                result = raw.trim();
+            }
+        }
+        else if (task === "enhanceAll") {
             try {
                 const parsed = JSON.parse(raw);
                 result = {
@@ -226,7 +241,7 @@ exports.processAi = functions.https.onRequest({
                         : [],
                 };
             }
-            catch (_x) {
+            catch (_y) {
                 result = { title: "", summary: raw.trim(), actions: [], tags: [] };
             }
         }
@@ -238,7 +253,7 @@ exports.processAi = functions.https.onRequest({
                     cleanTranscript: ((_t = parsed["cleanTranscript"]) !== null && _t !== void 0 ? _t : "").trim(),
                 };
             }
-            catch (_y) {
+            catch (_z) {
                 result = { title: "", cleanTranscript: raw.trim() };
             }
         }
