@@ -11,6 +11,21 @@ const openaiKey = defineSecret("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
 
+/** Long transcript cleanup must return nearly full input length; default 512 truncates. */
+function maxCompletionTokens(task: TaskType): number {
+  switch (task) {
+    case "chat":
+      return 1024;
+    case "cleanupTranscript":
+    case "cleanupAndTitle":
+      return 16384;
+    case "moodAnalysis":
+      return 4096;
+    default:
+      return 512;
+  }
+}
+
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
 const JSON_TASKS = new Set<TaskType>(["enhanceAll", "cleanupAndTitle", "moodAnalysis"]);
 
@@ -194,7 +209,7 @@ export const processAi = functions.https.onRequest(
         model: MODEL,
         messages,
         temperature: 0.3,
-        max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : task === "moodAnalysis" ? 4096 : 512,
+        max_tokens: maxCompletionTokens(task),
         ...(isJson ? {response_format: {type: "json_object"}} : {}),
       });
 

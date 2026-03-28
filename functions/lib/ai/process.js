@@ -49,6 +49,20 @@ const rate_limiter_1 = require("../rate-limiter");
 const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 const MODEL = "gpt-4o-mini";
 const EMBED_MODEL = "text-embedding-3-small";
+/** Long transcript cleanup must return nearly full input length; default 512 truncates. */
+function maxCompletionTokens(task) {
+    switch (task) {
+        case "chat":
+            return 1024;
+        case "cleanupTranscript":
+        case "cleanupAndTitle":
+            return 16384;
+        case "moodAnalysis":
+            return 4096;
+        default:
+            return 512;
+    }
+}
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
 const JSON_TASKS = new Set(["enhanceAll", "cleanupAndTitle", "moodAnalysis"]);
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
@@ -210,7 +224,7 @@ exports.processAi = functions.https.onRequest({
     // ── Chat completion ────────────────────────────────────────────────────
     try {
         const isJson = JSON_TASKS.has(task);
-        const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: task === "chat" ? 1024 : task === "cleanupAndTitle" ? 8192 : task === "moodAnalysis" ? 4096 : 512 }, (isJson ? { response_format: { type: "json_object" } } : {})));
+        const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: maxCompletionTokens(task) }, (isJson ? { response_format: { type: "json_object" } } : {})));
         const raw = (_k = (_j = (_h = completion.choices[0]) === null || _h === void 0 ? void 0 : _h.message) === null || _j === void 0 ? void 0 : _j.content) !== null && _k !== void 0 ? _k : "";
         const promptTokens = (_m = (_l = completion.usage) === null || _l === void 0 ? void 0 : _l.prompt_tokens) !== null && _m !== void 0 ? _m : 0;
         const completionTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.completion_tokens) !== null && _p !== void 0 ? _p : 0;
