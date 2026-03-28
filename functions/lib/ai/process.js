@@ -103,8 +103,9 @@ const ALLOWED_APP_IDS = new Set([
 ]);
 exports.processAi = functions.https.onRequest({
     secrets: [openaiKey],
-    timeoutSeconds: 60,
-    memory: "256MiB",
+    // Long transcript cleanup + 16k completion can exceed 60s
+    timeoutSeconds: 300,
+    memory: "512MiB",
     cors: true,
     invoker: "public",
 }, async (req, res) => {
