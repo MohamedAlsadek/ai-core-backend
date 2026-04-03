@@ -9,6 +9,7 @@ export type TaskType =
   | "enhanceAll"
   | "custom"
   | "embed"
+  | "transcribe"
   | "mainPoints"
   | "meetingReport"
   | "cleanupTranscript"

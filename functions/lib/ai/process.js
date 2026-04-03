@@ -91,8 +91,10 @@ function extractJsonArray(raw) {
         return [];
     }
 }
+const WHISPER_MODEL = "whisper-1";
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper limit: 25 MB
 // Tasks that don't go through the chat completions path
-const NON_CHAT_TASKS = new Set(["embed"]);
+const NON_CHAT_TASKS = new Set(["embed", "transcribe"]);
 // Allowed app IDs — add new apps here when onboarding them
 const ALLOWED_APP_IDS = new Set([
     "voicenote",
@@ -109,7 +111,7 @@ exports.processAi = functions.https.onRequest({
     cors: true,
     invoker: "public",
 }, async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
     // ── Method ─────────────────────────────────────────────────────────────
     if (req.method !== "POST") {
         res.status(405).json({ error: "Method not allowed" });
@@ -121,7 +123,7 @@ exports.processAi = functions.https.onRequest({
         body =
             typeof req.body === "string" ? JSON.parse(req.body) : (_a = req.body) !== null && _a !== void 0 ? _a : {};
     }
-    catch (_w) {
+    catch (_y) {
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
@@ -212,6 +214,37 @@ exports.processAi = functions.https.onRequest({
             }
             return;
         }
+        if (task === "transcribe") {
+            const audioBase64 = body["audioBase64"];
+            const audioFormat = (_h = body["audioFormat"]) !== null && _h !== void 0 ? _h : "m4a";
+            if (!audioBase64 || audioBase64.length === 0) {
+                res.status(400).json({ error: "transcribe task requires audioBase64 field" });
+                return;
+            }
+            const audioBuffer = Buffer.from(audioBase64, "base64");
+            if (audioBuffer.length > MAX_AUDIO_BYTES) {
+                res.status(400).json({ error: `Audio too large (${Math.round(audioBuffer.length / 1024 / 1024)}MB). Max 25MB.` });
+                return;
+            }
+            try {
+                const file = new File([audioBuffer], `audio.${audioFormat}`, {
+                    type: `audio/${audioFormat}`,
+                });
+                const response = await openai.audio.transcriptions.create({
+                    model: WHISPER_MODEL,
+                    file,
+                    response_format: "text",
+                });
+                (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "transcribe", model: WHISPER_MODEL, promptTokens: 0, completionTokens: 0 }).catch(() => { });
+                res.json({ result: response, tokensUsed: 0 });
+            }
+            catch (e) {
+                const err = e;
+                functions.logger.error("[processAi] transcribe error", { msg: err.message, appId });
+                res.status(502).json({ error: (_j = err.message) !== null && _j !== void 0 ? _j : "Transcription error" });
+            }
+            return;
+        }
     }
     // ── Build messages ─────────────────────────────────────────────────────
     let messages;
@@ -226,9 +259,9 @@ exports.processAi = functions.https.onRequest({
     try {
         const isJson = JSON_TASKS.has(task);
         const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: maxCompletionTokens(task) }, (isJson ? { response_format: { type: "json_object" } } : {})));
-        const raw = (_k = (_j = (_h = completion.choices[0]) === null || _h === void 0 ? void 0 : _h.message) === null || _j === void 0 ? void 0 : _j.content) !== null && _k !== void 0 ? _k : "";
-        const promptTokens = (_m = (_l = completion.usage) === null || _l === void 0 ? void 0 : _l.prompt_tokens) !== null && _m !== void 0 ? _m : 0;
-        const completionTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.completion_tokens) !== null && _p !== void 0 ? _p : 0;
+        const raw = (_m = (_l = (_k = completion.choices[0]) === null || _k === void 0 ? void 0 : _k.message) === null || _l === void 0 ? void 0 : _l.content) !== null && _m !== void 0 ? _m : "";
+        const promptTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.prompt_tokens) !== null && _p !== void 0 ? _p : 0;
+        const completionTokens = (_r = (_q = completion.usage) === null || _q === void 0 ? void 0 : _q.completion_tokens) !== null && _r !== void 0 ? _r : 0;
         const totalTokens = promptTokens + completionTokens;
         // ── Parse result ────────────────────────────────────────────────────
         let result;
@@ -238,7 +271,7 @@ exports.processAi = functions.https.onRequest({
                 const cards = parsed["cards"];
                 result = Array.isArray(cards) ? cards : [parsed];
             }
-            catch (_x) {
+            catch (_z) {
                 result = raw.trim();
             }
         }
@@ -246,8 +279,8 @@ exports.processAi = functions.https.onRequest({
             try {
                 const parsed = JSON.parse(raw);
                 result = {
-                    title: ((_q = parsed["title"]) !== null && _q !== void 0 ? _q : "").trim(),
-                    summary: ((_r = parsed["summary"]) !== null && _r !== void 0 ? _r : "").trim(),
+                    title: ((_s = parsed["title"]) !== null && _s !== void 0 ? _s : "").trim(),
+                    summary: ((_t = parsed["summary"]) !== null && _t !== void 0 ? _t : "").trim(),
                     actions: Array.isArray(parsed["actions"])
                         ? parsed["actions"].map(String)
                         : [],
@@ -256,7 +289,7 @@ exports.processAi = functions.https.onRequest({
                         : [],
                 };
             }
-            catch (_y) {
+            catch (_0) {
                 result = { title: "", summary: raw.trim(), actions: [], tags: [] };
             }
         }
@@ -264,11 +297,11 @@ exports.processAi = functions.https.onRequest({
             try {
                 const parsed = JSON.parse(raw);
                 result = {
-                    title: ((_s = parsed["title"]) !== null && _s !== void 0 ? _s : "").trim(),
-                    cleanTranscript: ((_t = parsed["cleanTranscript"]) !== null && _t !== void 0 ? _t : "").trim(),
+                    title: ((_u = parsed["title"]) !== null && _u !== void 0 ? _u : "").trim(),
+                    cleanTranscript: ((_v = parsed["cleanTranscript"]) !== null && _v !== void 0 ? _v : "").trim(),
                 };
             }
-            catch (_z) {
+            catch (_1) {
                 result = { title: "", cleanTranscript: raw.trim() };
             }
         }
@@ -296,13 +329,13 @@ exports.processAi = functions.https.onRequest({
         const err = e;
         functions.logger.error("[processAi] OpenAI error", {
             msg: err.message,
-            cause: String((_u = err.cause) !== null && _u !== void 0 ? _u : ""),
+            cause: String((_w = err.cause) !== null && _w !== void 0 ? _w : ""),
             status: err.status,
             code: err.code,
             task,
             appId,
         });
-        res.status(502).json({ error: (_v = err.message) !== null && _v !== void 0 ? _v : "OpenAI error" });
+        res.status(502).json({ error: (_x = err.message) !== null && _x !== void 0 ? _x : "OpenAI error" });
     }
 });
 // ── Helper: verify Firestore is reachable (called by health check) ────────────

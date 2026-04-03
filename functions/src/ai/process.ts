@@ -54,8 +54,11 @@ function extractJsonArray(raw: string): string[] {
   }
 }
 
+const WHISPER_MODEL = "whisper-1";
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper limit: 25 MB
+
 // Tasks that don't go through the chat completions path
-const NON_CHAT_TASKS = new Set<TaskType>(["embed"]);
+const NON_CHAT_TASKS = new Set<TaskType>(["embed", "transcribe"]);
 
 // Allowed app IDs — add new apps here when onboarding them
 const ALLOWED_APP_IDS = new Set([
@@ -189,6 +192,42 @@ export const processAi = functions.https.onRequest(
           const err = e as Error;
           functions.logger.error("[processAi] embed error", {msg: err.message, appId});
           res.status(502).json({error: err.message ?? "Embed error"});
+        }
+        return;
+      }
+
+      if (task === "transcribe") {
+        const audioBase64 = (body as unknown as Record<string, unknown>)["audioBase64"] as string | undefined;
+        const audioFormat = ((body as unknown as Record<string, unknown>)["audioFormat"] as string | undefined) ?? "m4a";
+
+        if (!audioBase64 || audioBase64.length === 0) {
+          res.status(400).json({error: "transcribe task requires audioBase64 field"});
+          return;
+        }
+
+        const audioBuffer = Buffer.from(audioBase64, "base64");
+        if (audioBuffer.length > MAX_AUDIO_BYTES) {
+          res.status(400).json({error: `Audio too large (${Math.round(audioBuffer.length / 1024 / 1024)}MB). Max 25MB.`});
+          return;
+        }
+
+        try {
+          const file = new File([audioBuffer], `audio.${audioFormat}`, {
+            type: `audio/${audioFormat}`,
+          });
+
+          const response = await openai.audio.transcriptions.create({
+            model: WHISPER_MODEL,
+            file,
+            response_format: "text",
+          });
+
+          trackUsage({appId, userId: clientId, feature: "transcribe", model: WHISPER_MODEL, promptTokens: 0, completionTokens: 0}).catch(() => {});
+          res.json({result: response, tokensUsed: 0});
+        } catch (e) {
+          const err = e as Error;
+          functions.logger.error("[processAi] transcribe error", {msg: err.message, appId});
+          res.status(502).json({error: err.message ?? "Transcription error"});
         }
         return;
       }

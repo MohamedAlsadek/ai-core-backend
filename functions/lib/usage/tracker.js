@@ -41,6 +41,7 @@ const COST_PER_1K = {
     "gpt-4o": { input: 0.005, output: 0.015 },
     "text-embedding-3-small": { input: 0.00002, output: 0 },
     "text-embedding-3-large": { input: 0.00013, output: 0 },
+    "whisper-1": { input: 0.006, output: 0 },
 };
 function estimateCost(model, promptTokens, completionTokens) {
     var _a;
