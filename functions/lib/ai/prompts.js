@@ -8,8 +8,50 @@ function noteText(note) {
     const title = (_d = (_c = (_b = note.userTitle) !== null && _b !== void 0 ? _b : note.aiTitle) !== null && _c !== void 0 ? _c : note.title) !== null && _d !== void 0 ? _d : "";
     return title ? `Title: ${title}\n\n${transcript}` : transcript;
 }
+/**
+ * Map a BCP-47 language tag (e.g. "en", "en-US", "pt-BR", "zh-Hans") to the
+ * English name we put into the prompt. The base language is what matters to
+ * GPT, but we keep regional hints when they meaningfully change wording
+ * (Brazilian vs European Portuguese, Simplified vs Traditional Chinese).
+ */
+function resolveLanguageName(tag) {
+    var _a;
+    const normalized = tag.toLowerCase().replace("_", "-");
+    const exact = {
+        "pt-br": "Brazilian Portuguese",
+        "pt-pt": "European Portuguese",
+        "zh-hans": "Simplified Chinese",
+        "zh-hant": "Traditional Chinese",
+        "zh-cn": "Simplified Chinese",
+        "zh-tw": "Traditional Chinese",
+        "en-us": "English",
+        "en-gb": "British English",
+    };
+    if (exact[normalized])
+        return exact[normalized];
+    const base = normalized.split("-")[0];
+    const baseMap = {
+        en: "English",
+        es: "Spanish",
+        fr: "French",
+        de: "German",
+        zh: "Simplified Chinese",
+        ar: "Arabic",
+        pt: "Portuguese",
+        ja: "Japanese",
+        nl: "Dutch",
+        sv: "Swedish",
+        it: "Italian",
+        ru: "Russian",
+        ko: "Korean",
+        tr: "Turkish",
+        hi: "Hindi",
+        pl: "Polish",
+    };
+    return (_a = baseMap[base]) !== null && _a !== void 0 ? _a : "English";
+}
 function buildMessages(payload) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
     const { task, note, existingTags, messages, contextNotes, contextChunks } = payload;
     switch (task) {
         case "summarize": {
@@ -207,39 +249,98 @@ Return ONLY valid JSON, no markdown, no code blocks:
             ];
         }
         case "moodAnalysis": {
-            const entries = (_h = payload.moodEntries) !== null && _h !== void 0 ? _h : [];
-            const lang = (_j = payload.language) !== null && _j !== void 0 ? _j : "en";
-            const langMap = {
-                en: "English", es: "Spanish", fr: "French", de: "German",
-                zh: "Simplified Chinese", ar: "Arabic", pt: "Portuguese",
-                ja: "Japanese", nl: "Dutch", sv: "Swedish",
-            };
-            const langName = (_k = langMap[lang]) !== null && _k !== void 0 ? _k : "English";
+            // Prefer schema v2 (`entries`) if the client sent it; fall back to v1
+            // (`moodEntries`) so older app versions still work after this deploy.
+            const v2Entries = (_h = payload.entries) !== null && _h !== void 0 ? _h : [];
+            const v1Entries = (_j = payload.moodEntries) !== null && _j !== void 0 ? _j : [];
+            const isV2 = v2Entries.length > 0;
+            const langTag = (_k = payload.language) !== null && _k !== void 0 ? _k : "en";
+            const langName = resolveLanguageName(langTag);
             const langLine = `Respond entirely in ${langName}.`;
-            const system = `You are a mood-coaching AI. ${langLine}
-
-INPUT: A JSON array of mood entries, each with date, moodType (Very Happy / Happy / Neutral / Sad / Very Sad), activities, note, and sleepHours.
-
-OUTPUT: A JSON object with a single key "cards" containing an array of exactly 6 objects. Each object has:
-- "title": short emotionally engaging heading with 1-2 emojis (max 8 words)
-- "content": rich Markdown (## headers, **bold**, bullet points, emojis for tone). 4-6 sections per card, multiple paragraphs. Reference the user's actual data.
-- "cardColor": soft HEX background color suitable for dark text
-
-Markdown rules: only ## headers, **bold**, bullet points (• or -), plain text, line breaks, and emojis. No ###, no italic, no links, no code blocks, no tables.
-
-CARD ORDER:
+            // Shared instructions across schema versions.
+            const cardOrder = `CARD ORDER (six cards, fixed order, fixed colors):
 1. Mood Story & Patterns (#FFF3E0) — emotional arc, rhythm, timing patterns, undercurrents, reframes
 2. Energy & Activities (#E0F2F1) — energizing vs draining activities, combos, tailored suggestions
 3. Sleep & Recovery (#E8F5E8) — sleep rhythm, mood correlation, signs of debt or recovery, 1-2 tips
 4. Self-Care Alignment (#E8EAF6) — frequency, gaps, one routine or mindset shift
 5. Stress & Coping (#FFF0F5) — triggers from data, coping tools used, micro-strategies
-6. Strengths & Next Steps (#F0F8FF) — progress, strengths, 2 growth-oriented action steps
+6. Strengths & Next Steps (#F0F8FF) — progress, strengths, 2 growth-oriented action steps`;
+            const outputContract = `OUTPUT: A JSON object with a single key "cards" containing an array of exactly 6 objects. Each object has:
+- "title": short emotionally engaging heading with 1-2 emojis (max 8 words)
+- "content": rich Markdown (## headers, **bold**, bullet points, emojis for tone). 4-6 sections per card, multiple paragraphs. Reference the user's actual data.
+- "cardColor": soft HEX background color matching the card order above.
 
-Rules:
-- Ground every insight in the actual entries. Never use generic filler.
-- Each card must have 4-6 sections with multi-paragraph content.
-- Return ONLY valid JSON: {"cards": [...]}. No wrapping text or code fences.`;
-            const user = JSON.stringify({ entries }, null, 0);
+Markdown rules: only ## headers, **bold**, bullet points (• or -), plain text, line breaks, and emojis. No ###, no italic, no links, no code blocks, no tables.`;
+            // Safety guardrail every card must respect.
+            const safetyLine = `If a note clearly indicates self-harm, crisis, or imminent danger, do not generate behavioural advice. In every card mention that local support resources are listed in the app's settings, in a single calm sentence, and keep the rest of the wrap focused on patterns, not directives.`;
+            if (isV2) {
+                // ── Schema v2 prompt — uses precomputed stats and rich entry shape.
+                // The single most important rule: the AI must use `summary.*` numbers
+                // verbatim and never invent statistics. This is what stopped the old
+                // prompt from producing made-up "37% drop" style claims.
+                const system = `You are a thoughtful mood-coaching AI writing a personalised Weekly Wrap. ${langLine}
+
+INPUT FORMAT
+You receive a JSON object with these top-level keys:
+- "weekStart" / "weekEnd": ISO dates bracketing the week being analysed.
+- "timezone": user's UTC offset, e.g. "+02:00". Treat all entry datetimes in this offset.
+- "userContext": { totalEntries, weeksTracked, longestStreakDays, isFirstWrap }. Use these to calibrate the tone — first-wrap users get warmer, more inviting language; long-time users get sharper, more specific observations.
+- "summary": precomputed aggregates including avgMoodScore (1-5 scale: 1=verySad..5=veryHappy), moodScoreByDayOfWeek, moodScoreByPartOfDay, topActivities (with labels), and sleep correlations.
+- "entries": array of mood entries, each with full datetime + offset, dayOfWeek (Mon..Sun), partOfDay (morning/afternoon/evening/night), moodScore, moodLabel, activities (each with categoryId, itemId, label), sleepHours, and a possibly-truncated user note. Notes have already been scrubbed of obvious PII; treat them as soft signal, not gospel.
+
+NUMERIC GROUNDING — CRITICAL
+- Use numbers ONLY from "summary". Do NOT compute new percentages, deltas, or ratios from "entries". If a number you want to mention is not present in summary, drop the number and describe the pattern qualitatively instead.
+- When you cite a stat, reference it naturally (e.g. "your Wednesday mood averaged 4.0", not "I calculated that..."). Round to one decimal.
+- Never invent activity names. Use the "label" field of each activity. If "label" is missing, refer to the activity vaguely (e.g. "an activity tagged this week") rather than the raw itemId.
+
+VOICE
+- Second person, warm, curious. Avoid clinical jargon. Avoid hollow encouragement.
+- Highlight specifics from the data — name a day-of-week, a part-of-day, an activity label, a sleep hour count. Vague cards are failed cards.
+- One growth-oriented suggestion per card maximum, framed as an experiment ("try…", "notice if…"), never a directive.
+
+${cardOrder}
+
+${outputContract}
+
+SAFETY
+${safetyLine}
+
+Return ONLY valid JSON: {"cards": [...]}. No wrapping text, no code fences.`;
+                // Forward only the fields the AI actually needs. Stripping unused
+                // fields trims a meaningful chunk of input tokens on power users.
+                const user = JSON.stringify({
+                    weekStart: payload.weekStart,
+                    weekEnd: payload.weekEnd,
+                    timezone: payload.timezone,
+                    userContext: (_l = payload.userContext) !== null && _l !== void 0 ? _l : {},
+                    summary: (_m = payload.summary) !== null && _m !== void 0 ? _m : {},
+                    entries: v2Entries,
+                });
+                return [
+                    { role: "system", content: system },
+                    { role: "user", content: user },
+                ];
+            }
+            // ── Schema v1 prompt — legacy fallback, unchanged in spirit but with
+            // tighter grounding rules so older clients also benefit from the
+            // anti-hallucination work.
+            const system = `You are a mood-coaching AI. ${langLine}
+
+INPUT: A JSON array of mood entries, each with date, moodType (Very Happy / Happy / Neutral / Sad / Very Sad), activities (slug strings), note, and sleepHours.
+
+NUMERIC GROUNDING
+- Do not invent percentages, ratios, or deltas. If a precise number is unsupported by the entries, describe the pattern qualitatively instead.
+- Activity strings are slugs, not human names — refer to them generically (e.g. "a movement-related activity") rather than quoting the raw slug.
+
+${outputContract}
+
+${cardOrder}
+
+SAFETY
+${safetyLine}
+
+Return ONLY valid JSON: {"cards": [...]}. No wrapping text, no code fences.`;
+            const user = JSON.stringify({ entries: v1Entries });
             return [
                 { role: "system", content: system },
                 { role: "user", content: user },
