@@ -17,11 +17,14 @@ const openaiKey = defineSecret("OPENAI_API_KEY");
 const MODELS = Object.freeze({
   chat: "gpt-4o-mini",
   embed: "text-embedding-3-small",
-  transcribe: "whisper-1",
+  // All STT in this service uses gpt-4o-mini-transcribe (the `transcribe` task
+  // and the voiceMoodInfer pipeline). Server-controlled; never from the client.
+  transcribe: "gpt-4o-mini-transcribe",
 } as const);
 
 const MODEL = MODELS.chat;
 const EMBED_MODEL = MODELS.embed;
+const TRANSCRIBE_MODEL = MODELS.transcribe;
 
 /** Long transcript cleanup must return nearly full input length; default 512 truncates. */
 function maxCompletionTokens(task: TaskType): number {
@@ -33,13 +36,17 @@ function maxCompletionTokens(task: TaskType): number {
       return 16384;
     case "moodAnalysis":
       return 4096;
+    case "voiceMoodInfer":
+      // Output is a small JSON object with a 280-char note; 600 is plenty
+      // of headroom even with multi-byte characters.
+      return 600;
     default:
       return 512;
   }
 }
 
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
-const JSON_TASKS = new Set<TaskType>(["enhanceAll", "cleanupAndTitle", "moodAnalysis"]);
+const JSON_TASKS = new Set<TaskType>(["enhanceAll", "cleanupAndTitle", "moodAnalysis", "voiceMoodInfer"]);
 
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
 function stripLeadingTitle(text: string): string {
@@ -66,8 +73,7 @@ function extractJsonArray(raw: string): string[] {
   }
 }
 
-const WHISPER_MODEL = MODELS.transcribe;
-const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper limit: 25 MB
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // max upload for `transcribe` task
 
 // Tasks that don't go through the chat completions path
 const NON_CHAT_TASKS = new Set<TaskType>(["embed", "transcribe"]);
@@ -79,7 +85,7 @@ const ALLOWED_TASKS: ReadonlySet<TaskType> = new Set<TaskType>([
   "summarize", "title", "actions", "tags", "chat", "enhanceAll", "custom",
   "embed", "transcribe", "mainPoints", "meetingReport", "cleanupTranscript",
   "draftEmail", "draftBlog", "translate", "draftTweet", "cleanupAndTitle",
-  "moodAnalysis",
+  "moodAnalysis", "voiceMoodInfer",
 ]);
 
 // Fields a client is NEVER allowed to set. Stripped before any downstream
@@ -267,12 +273,12 @@ export const processAi = functions.https.onRequest(
           });
 
           const response = await openai.audio.transcriptions.create({
-            model: WHISPER_MODEL,
+            model: TRANSCRIBE_MODEL,
             file,
             response_format: "text",
           });
 
-          trackUsage({appId, userId: clientId, feature: "transcribe", model: WHISPER_MODEL, promptTokens: 0, completionTokens: 0}).catch(() => {});
+          trackUsage({appId, userId: clientId, feature: "transcribe", model: TRANSCRIBE_MODEL, promptTokens: 0, completionTokens: 0}).catch(() => {});
           res.json({result: response, tokensUsed: 0});
         } catch (e) {
           const err = e as Error;
@@ -281,6 +287,149 @@ export const processAi = functions.https.onRequest(
         }
         return;
       }
+    }
+
+    // ── voiceMoodInfer (separate path) ────────────────────────────────────
+    // Two-step pipeline: (1) gpt-4o-mini-transcribe, (2) chat-completion
+    // mood inference. Done server-side in one HTTP round trip so the client
+    // sees ~3s end-to-end instead of ~6s. If the inference step fails after
+    // a successful transcription, we still return the transcript — the
+    // user already paid the latency cost, don't make them pay it again.
+    if (task === "voiceMoodInfer") {
+      // Tighter audio cap than the standalone transcribe task. 60s of m4a
+      // mono 32kbps is ~240KB; 5MB gives ~20× headroom for higher bitrates
+      // and bounds the worst-case OpenAI bill per request.
+      const VOICE_MOOD_MAX_AUDIO_BYTES = 5 * 1024 * 1024;
+
+      const reqBody = body as unknown as Record<string, unknown>;
+      const audioBase64 = reqBody["audioBase64"] as string | undefined;
+      const audioFormat = (reqBody["audioFormat"] as string | undefined) ?? "m4a";
+      const presuppliedTranscript = (reqBody["voiceTranscript"] as string | undefined)?.trim();
+
+      if (!audioBase64 && !presuppliedTranscript) {
+        res.status(400).json({error: "voiceMoodInfer requires either audioBase64 or voiceTranscript"});
+        return;
+      }
+
+      // ── Step 1: transcribe (or use the presupplied transcript) ────────
+      let transcript = presuppliedTranscript ?? "";
+      let transcribeTokens = 0;
+
+      if (!presuppliedTranscript) {
+        const audioBuffer = Buffer.from(audioBase64!, "base64");
+        if (audioBuffer.length > VOICE_MOOD_MAX_AUDIO_BYTES) {
+          res.status(400).json({error: `Audio too large for voiceMoodInfer (${Math.round(audioBuffer.length / 1024 / 1024)}MB). Max 5MB.`});
+          return;
+        }
+
+        try {
+          const file = new File([audioBuffer], `audio.${audioFormat}`, {
+            type: `audio/${audioFormat}`,
+          });
+          const stt = await openai.audio.transcriptions.create({
+            model: TRANSCRIBE_MODEL,
+            file,
+            response_format: "text",
+          });
+          transcript = String(stt).trim();
+        } catch (e) {
+          const err = e as Error;
+          functions.logger.error("[processAi] voiceMoodInfer transcribe error", {msg: err.message, appId});
+          res.status(502).json({error: err.message ?? "Transcription error", code: "TRANSCRIBE_FAILED"});
+          return;
+        }
+
+        trackUsage({appId, userId: clientId, feature: "voiceMoodInfer.transcribe", model: TRANSCRIBE_MODEL, promptTokens: 0, completionTokens: 0}).catch(() => {});
+      }
+
+      // ── Step 2: mood inference (best-effort — never fails the call) ────
+      // Defaults returned if inference is skipped or fails. The client can
+      // distinguish "no inference" from "inference said neutral with high
+      // confidence" via the `confidence` field.
+      let moodType: string | null = null;
+      let suggestedActivityIds: string[] = [];
+      let cleanedNote = "";
+      let confidence: "high" | "medium" | "low" = "low";
+      let inferTokens = 0;
+
+      // Skip inference if the transcript is too short to be meaningful.
+      // Threshold tuned to roughly "did the user say more than a single
+      // word." The client renders this as "Couldn't catch the mood" and
+      // falls back to manual entry.
+      const MIN_TRANSCRIBABLE_CHARS = 4;
+      if (transcript.length >= MIN_TRANSCRIBABLE_CHARS) {
+        try {
+          // buildMessages reads the transcript from `payload.voiceTranscript`
+          // — pass the just-resolved transcript through, regardless of how
+          // we obtained it.
+          const inferMessages = buildMessages({
+            ...body,
+            task: "voiceMoodInfer",
+            voiceTranscript: transcript,
+          } as TaskPayload);
+
+          const completion = await openai.chat.completions.create({
+            model: MODEL,
+            messages: inferMessages,
+            temperature: 0.3,
+            max_tokens: maxCompletionTokens("voiceMoodInfer"),
+            response_format: {type: "json_object"},
+          });
+
+          const raw = completion.choices[0]?.message?.content ?? "";
+          inferTokens = (completion.usage?.prompt_tokens ?? 0) + (completion.usage?.completion_tokens ?? 0);
+
+          try {
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+            // ── Sanitize: never trust the model's output, always allowlist.
+            const VALID_MOODS = new Set(["veryHappy", "happy", "neutral", "sad", "verySad"]);
+            const rawMood = String(parsed["moodType"] ?? "").trim();
+            moodType = VALID_MOODS.has(rawMood) ? rawMood : null;
+
+            // Filter suggested IDs against what the client actually has.
+            const userActivities = Array.isArray(body.userActivities) ? body.userActivities : [];
+            const userIdSet = new Set(
+              userActivities.map((a) => `${a.categoryId}:${a.itemId}`),
+            );
+            const rawIds = Array.isArray(parsed["suggestedActivityIds"]) ?
+              (parsed["suggestedActivityIds"] as unknown[]).map(String) :
+              [];
+            suggestedActivityIds = rawIds
+              .filter((id) => userIdSet.has(id))
+              .slice(0, 4);
+
+            // Truncate the cleaned note to keep storage and AI Wrap input
+            // bounded. The 280-char limit matches the prompt contract.
+            const rawNote = String(parsed["cleanedNote"] ?? "").trim();
+            cleanedNote = rawNote.length > 280 ? rawNote.slice(0, 280) : rawNote;
+
+            const VALID_CONFIDENCE = new Set(["high", "medium", "low"]);
+            const rawConf = String(parsed["confidence"] ?? "").trim();
+            confidence = (VALID_CONFIDENCE.has(rawConf) ? rawConf : "medium") as
+              "high" | "medium" | "low";
+          } catch {
+            functions.logger.warn("[processAi] voiceMoodInfer parse failed — returning transcript only", {appId});
+          }
+        } catch (e) {
+          const err = e as Error;
+          functions.logger.warn("[processAi] voiceMoodInfer inference call failed — returning transcript only", {msg: err.message, appId});
+        }
+
+        trackUsage({appId, userId: clientId, feature: "voiceMoodInfer.infer", model: MODEL, promptTokens: 0, completionTokens: inferTokens}).catch(() => {});
+      }
+
+      res.json({
+        result: {
+          transcript,
+          moodType,
+          suggestedActivityIds,
+          cleanedNote,
+          confidence,
+        },
+        tokensUsed: transcribeTokens + inferTokens,
+      });
+      return;
     }
 
     // ── Build messages ─────────────────────────────────────────────────────

@@ -18,7 +18,8 @@ export type TaskType =
   | "translate"
   | "draftTweet"
   | "cleanupAndTitle"
-  | "moodAnalysis";
+  | "moodAnalysis"
+  | "voiceMoodInfer";
 
 interface Note {
   id?: number;
@@ -105,6 +106,19 @@ interface MoodUserContext {
   isFirstWrap?: boolean;
 }
 
+/**
+ * Activity option the user has configured in the moodtracker app, sent
+ * with a voiceMoodInfer request so the AI can suggest IDs the client can
+ * resolve back to real activities. The AI is instructed to ONLY suggest
+ * IDs from this list — anything else is filtered out server-side.
+ */
+export interface VoiceMoodActivityOption {
+  categoryId: string;
+  itemId: string;
+  label?: string;
+  categoryLabel?: string;
+}
+
 export interface TaskPayload {
   task: TaskType;
   note?: Note;
@@ -129,6 +143,16 @@ export interface TaskPayload {
   weekEnd?: string;
 
   language?: string; // BCP-47 language tag, e.g. "en", "en-US", "pt-BR"
+
+  // voiceMoodInfer — short voice-journal flow that returns transcript + a
+  // suggested mood/activities/cleaned note in a single round trip.
+  audioBase64?: string;
+  audioFormat?: string;
+  userActivities?: VoiceMoodActivityOption[];
+  // Pre-supplied transcript path: if the client already transcribed the audio
+  // (or we want to re-run inference on a stored transcript), it can skip the
+  // transcription step entirely. Mutually exclusive with audioBase64.
+  voiceTranscript?: string;
 }
 
 function noteText(note: Note): string {
@@ -512,6 +536,60 @@ Return ONLY valid JSON: {"cards": [...]}. No wrapping text, no code fences.`;
       return [
         {role: "system", content: system},
         {role: "user", content: user},
+      ];
+    }
+
+    case "voiceMoodInfer": {
+      // Build the second-stage prompt. The transcribe step happens in
+      // process.ts and feeds its result into `voiceTranscript` here, so this
+      // case only handles the inference half.
+      const transcript = (payload.voiceTranscript ?? "").trim();
+      const langTag = payload.language ?? "en";
+      const langName = resolveLanguageName(langTag);
+
+      // Compose the activity menu. We send the AI a numbered list of the
+      // user's actual activities and require it to pick IDs from that menu.
+      // IDs are exposed in `categoryId:itemId` form so the client can map
+      // back to its `ActivitySelection` model deterministically.
+      const activities = payload.userActivities ?? [];
+      const activityMenu = activities.length === 0 ?
+        "(none — return an empty array for suggestedActivityIds)" :
+        activities.slice(0, 80).map((a) => {
+          const id = `${a.categoryId}:${a.itemId}`;
+          const label = a.label ?? a.itemId;
+          const cat = a.categoryLabel ? ` [${a.categoryLabel}]` : "";
+          return `- "${id}"${cat} = ${label}`;
+        }).join("\n");
+
+      const system = `You are an empathetic listener for a mood-tracking app. The user just spoke a short voice journal entry. Read the transcript and produce a structured guess at how they're feeling.
+
+Respond entirely in ${langName}. Specifically: cleanedNote MUST be written in ${langName}, regardless of the transcript's language.
+
+OUTPUT — return ONLY this JSON object, no markdown, no commentary:
+{
+  "moodType": one of "veryHappy" | "happy" | "neutral" | "sad" | "verySad",
+  "suggestedActivityIds": array of up to 4 IDs from the menu below (strings, exact match),
+  "cleanedNote": a first-person note, 1–2 short sentences, max 280 characters,
+  "confidence": "high" | "medium" | "low"
+}
+
+ACTIVITY MENU (only suggest IDs from this list — never invent IDs or labels):
+${activityMenu}
+
+RULES
+- moodType: pick the single best match for the dominant emotion in the transcript. If the transcript is too short, garbled, or emotionally ambiguous, pick "neutral" and set confidence to "low".
+- suggestedActivityIds: only include activities the transcript actually mentions or strongly implies. Do not pad. An empty array is valid and correct when nothing fits.
+- cleanedNote: rewrite what the user said as a clean, first-person note in ${langName}. Do not summarize away their feelings. Do not add advice, diagnoses, or therapy language. No emojis. No headings. Maximum 280 characters — truncate gracefully if you need to.
+- confidence: "high" only if the speaker named a clear emotion (e.g. "I feel exhausted", "today was great"). "medium" if the emotion is implied but unambiguous. "low" if the transcript is short, ambiguous, or contradictory.
+
+SAFETY
+- If the transcript suggests self-harm, crisis, or imminent danger: pick the closest mood honestly, set confidence to "low", and write cleanedNote as a short, calm acknowledgement of what the user said. Do not give safety advice in the note — the app surfaces local resources elsewhere.
+
+Return ONLY the JSON object. No code fences. No prose.`;
+
+      return [
+        {role: "system", content: system},
+        {role: "user", content: transcript || "(no transcript available)"},
       ];
     }
 

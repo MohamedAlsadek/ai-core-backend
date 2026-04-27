@@ -55,10 +55,13 @@ const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 const MODELS = Object.freeze({
     chat: "gpt-4o-mini",
     embed: "text-embedding-3-small",
-    transcribe: "whisper-1",
+    // All STT in this service uses gpt-4o-mini-transcribe (the `transcribe` task
+    // and the voiceMoodInfer pipeline). Server-controlled; never from the client.
+    transcribe: "gpt-4o-mini-transcribe",
 });
 const MODEL = MODELS.chat;
 const EMBED_MODEL = MODELS.embed;
+const TRANSCRIBE_MODEL = MODELS.transcribe;
 /** Long transcript cleanup must return nearly full input length; default 512 truncates. */
 function maxCompletionTokens(task) {
     switch (task) {
@@ -69,12 +72,16 @@ function maxCompletionTokens(task) {
             return 16384;
         case "moodAnalysis":
             return 4096;
+        case "voiceMoodInfer":
+            // Output is a small JSON object with a 280-char note; 600 is plenty
+            // of headroom even with multi-byte characters.
+            return 600;
         default:
             return 512;
     }
 }
 // Tasks that return a JSON object (enhanceAll). actions/tags return arrays — must use plain text.
-const JSON_TASKS = new Set(["enhanceAll", "cleanupAndTitle", "moodAnalysis"]);
+const JSON_TASKS = new Set(["enhanceAll", "cleanupAndTitle", "moodAnalysis", "voiceMoodInfer"]);
 /** Strip leading "Title:" or "**Title:**" line from cleanup transcript output. */
 function stripLeadingTitle(text) {
     var _a, _b;
@@ -101,8 +108,7 @@ function extractJsonArray(raw) {
         return [];
     }
 }
-const WHISPER_MODEL = MODELS.transcribe;
-const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper limit: 25 MB
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // max upload for `transcribe` task
 // Tasks that don't go through the chat completions path
 const NON_CHAT_TASKS = new Set(["embed", "transcribe"]);
 // Explicit allowlist of every task this backend will accept. Anything else is
@@ -112,7 +118,7 @@ const ALLOWED_TASKS = new Set([
     "summarize", "title", "actions", "tags", "chat", "enhanceAll", "custom",
     "embed", "transcribe", "mainPoints", "meetingReport", "cleanupTranscript",
     "draftEmail", "draftBlog", "translate", "draftTweet", "cleanupAndTitle",
-    "moodAnalysis",
+    "moodAnalysis", "voiceMoodInfer",
 ]);
 // Fields a client is NEVER allowed to set. Stripped before any downstream
 // code reads from the body so a future refactor can't accidentally honor
@@ -138,7 +144,7 @@ exports.processAi = functions.https.onRequest({
     cors: true,
     invoker: "public",
 }, async (req, res) => {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10;
     // ── Method ─────────────────────────────────────────────────────────────
     if (req.method !== "POST") {
         res.status(405).json({ error: "Method not allowed" });
@@ -150,7 +156,7 @@ exports.processAi = functions.https.onRequest({
         body =
             typeof req.body === "string" ? JSON.parse(req.body) : (_a = req.body) !== null && _a !== void 0 ? _a : {};
     }
-    catch (_y) {
+    catch (_11) {
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
@@ -276,11 +282,11 @@ exports.processAi = functions.https.onRequest({
                     type: `audio/${audioFormat}`,
                 });
                 const response = await openai.audio.transcriptions.create({
-                    model: WHISPER_MODEL,
+                    model: TRANSCRIBE_MODEL,
                     file,
                     response_format: "text",
                 });
-                (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "transcribe", model: WHISPER_MODEL, promptTokens: 0, completionTokens: 0 }).catch(() => { });
+                (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "transcribe", model: TRANSCRIBE_MODEL, promptTokens: 0, completionTokens: 0 }).catch(() => { });
                 res.json({ result: response, tokensUsed: 0 });
             }
             catch (e) {
@@ -290,6 +296,127 @@ exports.processAi = functions.https.onRequest({
             }
             return;
         }
+    }
+    // ── voiceMoodInfer (separate path) ────────────────────────────────────
+    // Two-step pipeline: (1) gpt-4o-mini-transcribe, (2) chat-completion
+    // mood inference. Done server-side in one HTTP round trip so the client
+    // sees ~3s end-to-end instead of ~6s. If the inference step fails after
+    // a successful transcription, we still return the transcript — the
+    // user already paid the latency cost, don't make them pay it again.
+    if (task === "voiceMoodInfer") {
+        // Tighter audio cap than the standalone transcribe task. 60s of m4a
+        // mono 32kbps is ~240KB; 5MB gives ~20× headroom for higher bitrates
+        // and bounds the worst-case OpenAI bill per request.
+        const VOICE_MOOD_MAX_AUDIO_BYTES = 5 * 1024 * 1024;
+        const reqBody = body;
+        const audioBase64 = reqBody["audioBase64"];
+        const audioFormat = (_k = reqBody["audioFormat"]) !== null && _k !== void 0 ? _k : "m4a";
+        const presuppliedTranscript = (_l = reqBody["voiceTranscript"]) === null || _l === void 0 ? void 0 : _l.trim();
+        if (!audioBase64 && !presuppliedTranscript) {
+            res.status(400).json({ error: "voiceMoodInfer requires either audioBase64 or voiceTranscript" });
+            return;
+        }
+        // ── Step 1: transcribe (or use the presupplied transcript) ────────
+        let transcript = presuppliedTranscript !== null && presuppliedTranscript !== void 0 ? presuppliedTranscript : "";
+        let transcribeTokens = 0;
+        if (!presuppliedTranscript) {
+            const audioBuffer = Buffer.from(audioBase64, "base64");
+            if (audioBuffer.length > VOICE_MOOD_MAX_AUDIO_BYTES) {
+                res.status(400).json({ error: `Audio too large for voiceMoodInfer (${Math.round(audioBuffer.length / 1024 / 1024)}MB). Max 5MB.` });
+                return;
+            }
+            try {
+                const file = new File([audioBuffer], `audio.${audioFormat}`, {
+                    type: `audio/${audioFormat}`,
+                });
+                const stt = await openai.audio.transcriptions.create({
+                    model: TRANSCRIBE_MODEL,
+                    file,
+                    response_format: "text",
+                });
+                transcript = String(stt).trim();
+            }
+            catch (e) {
+                const err = e;
+                functions.logger.error("[processAi] voiceMoodInfer transcribe error", { msg: err.message, appId });
+                res.status(502).json({ error: (_m = err.message) !== null && _m !== void 0 ? _m : "Transcription error", code: "TRANSCRIBE_FAILED" });
+                return;
+            }
+            (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "voiceMoodInfer.transcribe", model: TRANSCRIBE_MODEL, promptTokens: 0, completionTokens: 0 }).catch(() => { });
+        }
+        // ── Step 2: mood inference (best-effort — never fails the call) ────
+        // Defaults returned if inference is skipped or fails. The client can
+        // distinguish "no inference" from "inference said neutral with high
+        // confidence" via the `confidence` field.
+        let moodType = null;
+        let suggestedActivityIds = [];
+        let cleanedNote = "";
+        let confidence = "low";
+        let inferTokens = 0;
+        // Skip inference if the transcript is too short to be meaningful.
+        // Threshold tuned to roughly "did the user say more than a single
+        // word." The client renders this as "Couldn't catch the mood" and
+        // falls back to manual entry.
+        const MIN_TRANSCRIBABLE_CHARS = 4;
+        if (transcript.length >= MIN_TRANSCRIBABLE_CHARS) {
+            try {
+                // buildMessages reads the transcript from `payload.voiceTranscript`
+                // — pass the just-resolved transcript through, regardless of how
+                // we obtained it.
+                const inferMessages = (0, prompts_1.buildMessages)(Object.assign(Object.assign({}, body), { task: "voiceMoodInfer", voiceTranscript: transcript }));
+                const completion = await openai.chat.completions.create({
+                    model: MODEL,
+                    messages: inferMessages,
+                    temperature: 0.3,
+                    max_tokens: maxCompletionTokens("voiceMoodInfer"),
+                    response_format: { type: "json_object" },
+                });
+                const raw = (_q = (_p = (_o = completion.choices[0]) === null || _o === void 0 ? void 0 : _o.message) === null || _p === void 0 ? void 0 : _p.content) !== null && _q !== void 0 ? _q : "";
+                inferTokens = ((_s = (_r = completion.usage) === null || _r === void 0 ? void 0 : _r.prompt_tokens) !== null && _s !== void 0 ? _s : 0) + ((_u = (_t = completion.usage) === null || _t === void 0 ? void 0 : _t.completion_tokens) !== null && _u !== void 0 ? _u : 0);
+                try {
+                    const parsed = JSON.parse(raw);
+                    // ── Sanitize: never trust the model's output, always allowlist.
+                    const VALID_MOODS = new Set(["veryHappy", "happy", "neutral", "sad", "verySad"]);
+                    const rawMood = String((_v = parsed["moodType"]) !== null && _v !== void 0 ? _v : "").trim();
+                    moodType = VALID_MOODS.has(rawMood) ? rawMood : null;
+                    // Filter suggested IDs against what the client actually has.
+                    const userActivities = Array.isArray(body.userActivities) ? body.userActivities : [];
+                    const userIdSet = new Set(userActivities.map((a) => `${a.categoryId}:${a.itemId}`));
+                    const rawIds = Array.isArray(parsed["suggestedActivityIds"]) ?
+                        parsed["suggestedActivityIds"].map(String) :
+                        [];
+                    suggestedActivityIds = rawIds
+                        .filter((id) => userIdSet.has(id))
+                        .slice(0, 4);
+                    // Truncate the cleaned note to keep storage and AI Wrap input
+                    // bounded. The 280-char limit matches the prompt contract.
+                    const rawNote = String((_w = parsed["cleanedNote"]) !== null && _w !== void 0 ? _w : "").trim();
+                    cleanedNote = rawNote.length > 280 ? rawNote.slice(0, 280) : rawNote;
+                    const VALID_CONFIDENCE = new Set(["high", "medium", "low"]);
+                    const rawConf = String((_x = parsed["confidence"]) !== null && _x !== void 0 ? _x : "").trim();
+                    confidence = (VALID_CONFIDENCE.has(rawConf) ? rawConf : "medium");
+                }
+                catch (_12) {
+                    functions.logger.warn("[processAi] voiceMoodInfer parse failed — returning transcript only", { appId });
+                }
+            }
+            catch (e) {
+                const err = e;
+                functions.logger.warn("[processAi] voiceMoodInfer inference call failed — returning transcript only", { msg: err.message, appId });
+            }
+            (0, tracker_1.trackUsage)({ appId, userId: clientId, feature: "voiceMoodInfer.infer", model: MODEL, promptTokens: 0, completionTokens: inferTokens }).catch(() => { });
+        }
+        res.json({
+            result: {
+                transcript,
+                moodType,
+                suggestedActivityIds,
+                cleanedNote,
+                confidence,
+            },
+            tokensUsed: transcribeTokens + inferTokens,
+        });
+        return;
     }
     // ── Build messages ─────────────────────────────────────────────────────
     let messages;
@@ -304,9 +431,9 @@ exports.processAi = functions.https.onRequest({
     try {
         const isJson = JSON_TASKS.has(task);
         const completion = await openai.chat.completions.create(Object.assign({ model: MODEL, messages, temperature: 0.3, max_tokens: maxCompletionTokens(task) }, (isJson ? { response_format: { type: "json_object" } } : {})));
-        const raw = (_m = (_l = (_k = completion.choices[0]) === null || _k === void 0 ? void 0 : _k.message) === null || _l === void 0 ? void 0 : _l.content) !== null && _m !== void 0 ? _m : "";
-        const promptTokens = (_p = (_o = completion.usage) === null || _o === void 0 ? void 0 : _o.prompt_tokens) !== null && _p !== void 0 ? _p : 0;
-        const completionTokens = (_r = (_q = completion.usage) === null || _q === void 0 ? void 0 : _q.completion_tokens) !== null && _r !== void 0 ? _r : 0;
+        const raw = (_0 = (_z = (_y = completion.choices[0]) === null || _y === void 0 ? void 0 : _y.message) === null || _z === void 0 ? void 0 : _z.content) !== null && _0 !== void 0 ? _0 : "";
+        const promptTokens = (_2 = (_1 = completion.usage) === null || _1 === void 0 ? void 0 : _1.prompt_tokens) !== null && _2 !== void 0 ? _2 : 0;
+        const completionTokens = (_4 = (_3 = completion.usage) === null || _3 === void 0 ? void 0 : _3.completion_tokens) !== null && _4 !== void 0 ? _4 : 0;
         const totalTokens = promptTokens + completionTokens;
         // ── Parse result ────────────────────────────────────────────────────
         let result;
@@ -316,7 +443,7 @@ exports.processAi = functions.https.onRequest({
                 const cards = parsed["cards"];
                 result = Array.isArray(cards) ? cards : [parsed];
             }
-            catch (_z) {
+            catch (_13) {
                 result = raw.trim();
             }
         }
@@ -324,8 +451,8 @@ exports.processAi = functions.https.onRequest({
             try {
                 const parsed = JSON.parse(raw);
                 result = {
-                    title: ((_s = parsed["title"]) !== null && _s !== void 0 ? _s : "").trim(),
-                    summary: ((_t = parsed["summary"]) !== null && _t !== void 0 ? _t : "").trim(),
+                    title: ((_5 = parsed["title"]) !== null && _5 !== void 0 ? _5 : "").trim(),
+                    summary: ((_6 = parsed["summary"]) !== null && _6 !== void 0 ? _6 : "").trim(),
                     actions: Array.isArray(parsed["actions"])
                         ? parsed["actions"].map(String)
                         : [],
@@ -334,7 +461,7 @@ exports.processAi = functions.https.onRequest({
                         : [],
                 };
             }
-            catch (_0) {
+            catch (_14) {
                 result = { title: "", summary: raw.trim(), actions: [], tags: [] };
             }
         }
@@ -342,11 +469,11 @@ exports.processAi = functions.https.onRequest({
             try {
                 const parsed = JSON.parse(raw);
                 result = {
-                    title: ((_u = parsed["title"]) !== null && _u !== void 0 ? _u : "").trim(),
-                    cleanTranscript: ((_v = parsed["cleanTranscript"]) !== null && _v !== void 0 ? _v : "").trim(),
+                    title: ((_7 = parsed["title"]) !== null && _7 !== void 0 ? _7 : "").trim(),
+                    cleanTranscript: ((_8 = parsed["cleanTranscript"]) !== null && _8 !== void 0 ? _8 : "").trim(),
                 };
             }
-            catch (_1) {
+            catch (_15) {
                 result = { title: "", cleanTranscript: raw.trim() };
             }
         }
@@ -374,13 +501,13 @@ exports.processAi = functions.https.onRequest({
         const err = e;
         functions.logger.error("[processAi] OpenAI error", {
             msg: err.message,
-            cause: String((_w = err.cause) !== null && _w !== void 0 ? _w : ""),
+            cause: String((_9 = err.cause) !== null && _9 !== void 0 ? _9 : ""),
             status: err.status,
             code: err.code,
             task,
             appId,
         });
-        res.status(502).json({ error: (_x = err.message) !== null && _x !== void 0 ? _x : "OpenAI error" });
+        res.status(502).json({ error: (_10 = err.message) !== null && _10 !== void 0 ? _10 : "OpenAI error" });
     }
 });
 // ── Helper: verify Firestore is reachable (called by health check) ────────────

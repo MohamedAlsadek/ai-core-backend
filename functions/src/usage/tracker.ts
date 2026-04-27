@@ -18,7 +18,10 @@ const COST_PER_1K: Record<string, {input: number; output: number}> = {
   "gpt-4o": {input: 0.005, output: 0.015},
   "text-embedding-3-small": {input: 0.00002, output: 0},
   "text-embedding-3-large": {input: 0.00013, output: 0},
-  "whisper-1": {input: 0.006, output: 0},
+  // Transcription is billed per audio minute, not per token, so the values
+  // below are placeholders — the actual calls track 0/0 tokens. We keep the
+  // entry so a future "track audio seconds → cost" upgrade has a hook.
+  "gpt-4o-mini-transcribe": {input: 0.003, output: 0},
 };
 
 function estimateCost(
