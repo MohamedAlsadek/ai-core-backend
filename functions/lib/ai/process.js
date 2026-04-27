@@ -47,8 +47,18 @@ const tracker_1 = require("../usage/tracker");
 const auth_1 = require("../auth");
 const rate_limiter_1 = require("../rate-limiter");
 const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
-const MODEL = "gpt-4o-mini";
-const EMBED_MODEL = "text-embedding-3-small";
+// ── Model lockdown ───────────────────────────────────────────────────────────
+// These are the ONLY models this backend will ever call. Model selection is
+// 100% server-controlled — never read from the request body. To change a model
+// you must edit and redeploy this file. Do not refactor this to read from
+// `body`, environment variables, or anything client-influenced.
+const MODELS = Object.freeze({
+    chat: "gpt-4o-mini",
+    embed: "text-embedding-3-small",
+    transcribe: "whisper-1",
+});
+const MODEL = MODELS.chat;
+const EMBED_MODEL = MODELS.embed;
 /** Long transcript cleanup must return nearly full input length; default 512 truncates. */
 function maxCompletionTokens(task) {
     switch (task) {
@@ -91,10 +101,27 @@ function extractJsonArray(raw) {
         return [];
     }
 }
-const WHISPER_MODEL = "whisper-1";
+const WHISPER_MODEL = MODELS.transcribe;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Whisper limit: 25 MB
 // Tasks that don't go through the chat completions path
 const NON_CHAT_TASKS = new Set(["embed", "transcribe"]);
+// Explicit allowlist of every task this backend will accept. Anything else is
+// rejected at the request boundary so a client can't probe for hidden tasks
+// or force a code path that bypasses model lockdown.
+const ALLOWED_TASKS = new Set([
+    "summarize", "title", "actions", "tags", "chat", "enhanceAll", "custom",
+    "embed", "transcribe", "mainPoints", "meetingReport", "cleanupTranscript",
+    "draftEmail", "draftBlog", "translate", "draftTweet", "cleanupAndTitle",
+    "moodAnalysis",
+]);
+// Fields a client is NEVER allowed to set. Stripped before any downstream
+// code reads from the body so a future refactor can't accidentally honor
+// them. Keeps model selection, token caps, etc. server-controlled.
+const FORBIDDEN_BODY_FIELDS = [
+    "model", "modelId", "modelName", "engine",
+    "temperature", "max_tokens", "maxTokens", "top_p", "topP",
+    "response_format", "responseFormat",
+];
 // Allowed app IDs — add new apps here when onboarding them
 const ALLOWED_APP_IDS = new Set([
     "voicenote",
@@ -127,9 +154,21 @@ exports.processAi = functions.https.onRequest({
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
+    // Defensive: drop any client-supplied field that could influence model
+    // selection or generation params. Model lockdown is enforced here too,
+    // not just by the absence of these fields in TaskPayload.
+    const bodyAsRecord = body;
+    for (const f of FORBIDDEN_BODY_FIELDS) {
+        if (f in bodyAsRecord)
+            delete bodyAsRecord[f];
+    }
     const { task, appId = "default" } = body;
     if (!task) {
         res.status(400).json({ error: "Missing required field: task" });
+        return;
+    }
+    if (!ALLOWED_TASKS.has(task)) {
+        res.status(400).json({ error: `Unknown task: ${task}` });
         return;
     }
     if (!ALLOWED_APP_IDS.has(appId)) {
@@ -146,9 +185,15 @@ exports.processAi = functions.https.onRequest({
         res.status(400).json({ error: `Task "${task}" requires a note with transcription` });
         return;
     }
-    if (task === "moodAnalysis" && (!body.moodEntries || body.moodEntries.length < 2)) {
-        res.status(400).json({ error: "moodAnalysis requires at least 2 mood entries" });
-        return;
+    if (task === "moodAnalysis") {
+        // Schema v2 clients send `entries`, v1 clients send `moodEntries`.
+        // Either is valid; require at least 2 of whichever was provided.
+        const v2Count = Array.isArray(body.entries) ? body.entries.length : 0;
+        const v1Count = Array.isArray(body.moodEntries) ? body.moodEntries.length : 0;
+        if (v2Count < 2 && v1Count < 2) {
+            res.status(400).json({ error: "moodAnalysis requires at least 2 mood entries" });
+            return;
+        }
     }
     const MAX_INPUT_CHARS = 50000;
     if (((_b = body.note) === null || _b === void 0 ? void 0 : _b.transcription) && body.note.transcription.length > MAX_INPUT_CHARS) {

@@ -16,7 +16,7 @@ Shared AI Core Backend (Firebase Cloud Functions)
   ├── POST /processAi   ← generic AI endpoint
   ├── GET  /health     ← health check
   ├── OpenAI integration (gpt-4o-mini, text-embedding-3-small)
-  ├── Rate limiting (100 req/day per user per app)
+  ├── Rate limiting (30 req/day per user per app)
   ├── Usage tracking (Firestore)
   └── Cross-project auth (Firebase token or device-ID fallback)
         │
@@ -175,7 +175,7 @@ final embeddings = response.data['result'] as List; // List<List<double>>
 
 ## Rate limiting
 
-- **Limit:** 100 requests per day per user (or device) per app
+- **Limit:** 30 requests per day per user (or device) per app
 - **Scope:** Per `appId` + `clientId` (uid, device ID, or IP)
 - **429 response:** `{ error: "Rate limit exceeded. Try again tomorrow.", code: "RATE_LIMIT_EXCEEDED" }`
 

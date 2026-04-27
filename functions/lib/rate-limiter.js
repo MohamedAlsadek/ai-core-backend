@@ -36,7 +36,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getClientId = getClientId;
 exports.checkRateLimit = checkRateLimit;
 const admin = __importStar(require("firebase-admin"));
-const RATE_LIMIT_PER_DAY = 100;
+// Daily request cap per (appId, clientId).
+//
+// Sized for real-user workloads, not power abuse. A heavy day for a single
+// person on a voice-notes app is ~10–25 ops (transcribe + enhanceAll + a
+// few chat turns). 30 leaves comfortable headroom while keeping the
+// per-bucket cost bounded if a client bypasses auth.
+//
+// Note: this alone does NOT stop abuse from rotating x-device-id values —
+// for that, enforce App Check + mandatory verified UID.
+const RATE_LIMIT_PER_DAY = 30;
 /** Derive a stable client ID from token, device header, or IP. */
 function getClientId(req, uid) {
     var _a, _b;
