@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.processAi = exports.health = void 0;
+exports.transcribeSpeakers = exports.processAi = exports.health = void 0;
 const admin = __importStar(require("firebase-admin"));
 const functions = __importStar(require("firebase-functions/v2"));
 const process_1 = require("./ai/process");
@@ -51,4 +51,7 @@ exports.health = functions.https.onRequest({ cors: true, invoker: "public" }, as
 // POST /processAi  — generic AI endpoint used by all apps
 var process_2 = require("./ai/process");
 Object.defineProperty(exports, "processAi", { enumerable: true, get: function () { return process_2.processAi; } });
+// POST /transcribeSpeakers — speaker-labelled transcription (voicenote only)
+var speakers_1 = require("./ai/speakers");
+Object.defineProperty(exports, "transcribeSpeakers", { enumerable: true, get: function () { return speakers_1.transcribeSpeakers; } });
 //# sourceMappingURL=index.js.map

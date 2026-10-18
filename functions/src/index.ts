@@ -20,3 +20,6 @@ export const health = functions.https.onRequest(
 
 // POST /processAi  — generic AI endpoint used by all apps
 export {processAi} from "./ai/process";
+
+// POST /transcribeSpeakers — speaker-labelled transcription (voicenote only)
+export {transcribeSpeakers} from "./ai/speakers";
