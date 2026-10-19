@@ -23,3 +23,6 @@ export {processAi} from "./ai/process";
 
 // POST /transcribeSpeakers — speaker-labelled transcription (voicenote only)
 export {transcribeSpeakers} from "./ai/speakers";
+
+// POST /liveSession — live transcription credentials (voicenote only)
+export {liveSession} from "./live/session";

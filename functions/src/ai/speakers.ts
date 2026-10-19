@@ -1,5 +1,6 @@
 import * as functions from "firebase-functions/v2";
 import {defineSecret} from "firebase-functions/params";
+import OpenAI from "openai";
 import {verifyAuth} from "../auth";
 import {checkRateLimit, getClientId} from "../rate-limiter";
 import {trackUsage} from "../usage/tracker";
@@ -10,7 +11,6 @@ const openaiKey = defineSecret("OPENAI_API_KEY");
 // Server-controlled model, same lockdown rule as processAi: never read the
 // model from the request.
 const SPEAKER_MODEL = "gpt-4o-transcribe-diarize";
-const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // OpenAI upload limit
 const UPSTREAM_TIMEOUT_MS = 500_000; // leaves headroom under timeoutSeconds
@@ -142,40 +142,29 @@ export const transcribeSpeakers = functions.https.onRequest(
       return;
     }
 
-    // The pinned openai SDK (v4) predates diarization, so call the REST
-    // endpoint directly instead of upgrading the SDK under processAi.
-    const form = new FormData();
-    form.append(
-      "file",
-      new File([audioBuffer], `audio.${audioFormat}`, {type: `audio/${audioFormat}`}),
-    );
-    form.append("model", SPEAKER_MODEL);
-    form.append("response_format", "diarized_json");
-    // Required by the diarization model for audio longer than 30 seconds.
-    form.append("chunking_strategy", "auto");
-    if (language) form.append("language", language);
-
-    let upstream: Response;
+    // Through the SDK rather than global fetch: fetch gives up after five
+    // minutes without response headers, and long files take longer than
+    // that. The pinned SDK (v4) predates diarization, so the diarization
+    // fields are passed through as-is.
+    const openai = new OpenAI({apiKey, timeout: UPSTREAM_TIMEOUT_MS, maxRetries: 0});
+    let payload: Record<string, unknown>;
     try {
-      upstream = await fetch(OPENAI_TRANSCRIPTIONS_URL, {
-        method: "POST",
-        headers: {Authorization: `Bearer ${apiKey}`},
-        body: form,
-        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-      });
+      payload = await openai.audio.transcriptions.create({
+        file: new File([audioBuffer], `audio.${audioFormat}`, {type: `audio/${audioFormat}`}),
+        model: SPEAKER_MODEL,
+        response_format: "diarized_json",
+        // Required by the diarization model for audio longer than 30 seconds.
+        chunking_strategy: "auto",
+        ...(language ? {language} : {}),
+      } as unknown as OpenAI.Audio.TranscriptionCreateParams) as unknown as Record<string, unknown>;
     } catch (e) {
-      const err = e as Error;
-      functions.logger.error("[transcribeSpeakers] request failed", {msg: err.message, appId});
+      const err = e as Error & {status?: number};
+      functions.logger.error("[transcribeSpeakers] upstream error", {
+        status: err.status,
+        msg: err.message,
+        appId,
+      });
       res.status(502).json({error: err.message ?? "Speaker transcription failed"});
-      return;
-    }
-
-    const payload = await upstream.json().catch(() => null) as Record<string, unknown> | null;
-    if (!upstream.ok || !payload) {
-      const upstreamError = payload?.["error"] as {message?: string} | undefined;
-      const message = upstreamError?.message ?? `Speaker transcription failed (HTTP ${upstream.status})`;
-      functions.logger.error("[transcribeSpeakers] upstream error", {status: upstream.status, msg: message, appId});
-      res.status(502).json({error: message});
       return;
     }
 

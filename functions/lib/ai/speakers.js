@@ -32,10 +32,14 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.transcribeSpeakers = void 0;
 const functions = __importStar(require("firebase-functions/v2"));
 const params_1 = require("firebase-functions/params");
+const openai_1 = __importDefault(require("openai"));
 const auth_1 = require("../auth");
 const rate_limiter_1 = require("../rate-limiter");
 const tracker_1 = require("../usage/tracker");
@@ -44,7 +48,6 @@ const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 // Server-controlled model, same lockdown rule as processAi: never read the
 // model from the request.
 const SPEAKER_MODEL = "gpt-4o-transcribe-diarize";
-const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // OpenAI upload limit
 const UPSTREAM_TIMEOUT_MS = 500000; // leaves headroom under timeoutSeconds
 const ALLOWED_APP_IDS = new Set(["voicenote"]);
@@ -92,7 +95,7 @@ exports.transcribeSpeakers = functions.https.onRequest({
     cors: true,
     invoker: "public",
 }, async (req, res) => {
-    var _a, _b;
+    var _a;
     if (req.method !== "POST") {
         res.status(405).json({ error: "Method not allowed" });
         return;
@@ -102,7 +105,7 @@ exports.transcribeSpeakers = functions.https.onRequest({
         const parsed = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
         body = parsed && typeof parsed === "object" ? parsed : {};
     }
-    catch (_c) {
+    catch (_b) {
         res.status(400).json({ error: "Invalid JSON body" });
         return;
     }
@@ -156,37 +159,25 @@ exports.transcribeSpeakers = functions.https.onRequest({
         res.status(500).json({ error: "OPENAI_API_KEY not configured" });
         return;
     }
-    // The pinned openai SDK (v4) predates diarization, so call the REST
-    // endpoint directly instead of upgrading the SDK under processAi.
-    const form = new FormData();
-    form.append("file", new File([audioBuffer], `audio.${audioFormat}`, { type: `audio/${audioFormat}` }));
-    form.append("model", SPEAKER_MODEL);
-    form.append("response_format", "diarized_json");
-    // Required by the diarization model for audio longer than 30 seconds.
-    form.append("chunking_strategy", "auto");
-    if (language)
-        form.append("language", language);
-    let upstream;
+    // Through the SDK rather than global fetch: fetch gives up after five
+    // minutes without response headers, and long files take longer than
+    // that. The pinned SDK (v4) predates diarization, so the diarization
+    // fields are passed through as-is.
+    const openai = new openai_1.default({ apiKey, timeout: UPSTREAM_TIMEOUT_MS, maxRetries: 0 });
+    let payload;
     try {
-        upstream = await fetch(OPENAI_TRANSCRIPTIONS_URL, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}` },
-            body: form,
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-        });
+        payload = await openai.audio.transcriptions.create(Object.assign({ file: new File([audioBuffer], `audio.${audioFormat}`, { type: `audio/${audioFormat}` }), model: SPEAKER_MODEL, response_format: "diarized_json", 
+            // Required by the diarization model for audio longer than 30 seconds.
+            chunking_strategy: "auto" }, (language ? { language } : {})));
     }
     catch (e) {
         const err = e;
-        functions.logger.error("[transcribeSpeakers] request failed", { msg: err.message, appId });
+        functions.logger.error("[transcribeSpeakers] upstream error", {
+            status: err.status,
+            msg: err.message,
+            appId,
+        });
         res.status(502).json({ error: (_a = err.message) !== null && _a !== void 0 ? _a : "Speaker transcription failed" });
-        return;
-    }
-    const payload = await upstream.json().catch(() => null);
-    if (!upstream.ok || !payload) {
-        const upstreamError = payload === null || payload === void 0 ? void 0 : payload["error"];
-        const message = (_b = upstreamError === null || upstreamError === void 0 ? void 0 : upstreamError.message) !== null && _b !== void 0 ? _b : `Speaker transcription failed (HTTP ${upstream.status})`;
-        functions.logger.error("[transcribeSpeakers] upstream error", { status: upstream.status, msg: message, appId });
-        res.status(502).json({ error: message });
         return;
     }
     const segments = parseSegments(payload["segments"]);
