@@ -39,27 +39,26 @@ const params_1 = require("firebase-functions/params");
 const auth_1 = require("../auth");
 const rate_limiter_1 = require("../rate-limiter");
 const assemblyai_1 = require("./assemblyai");
-const allowance_1 = require("./allowance");
 const openai_1 = require("./openai");
 const assemblyAiKey = (0, params_1.defineSecret)("ASSEMBLYAI_API_KEY");
 // Same Secret Manager entry as processAi (defineSecret de-duplicates by name).
 const openaiKey = (0, params_1.defineSecret)("OPENAI_API_KEY");
 const ALLOWED_APP_IDS = new Set(["voicenote"]);
 const LANGUAGE_CODE = /^[a-z]{2,3}$/;
-/** Below this, a new speaker-labelled session isn't worth opening. */
-const MIN_ASSEMBLYAI_SECONDS = 60;
+/** AssemblyAI's own per-session cap. */
+const MAX_SESSION_SECONDS = 3 * 60 * 60;
 /**
  * POST /liveSession — short-lived credentials for live transcription.
  *
- * The app picks the provider and falls back on its own; this function only
- * issues credentials, so provider API keys never leave the server.
+ * The app picks the provider, falls back on its own, and tracks each user's
+ * monthly budget; this function only issues credentials, so provider API
+ * keys never leave the server.
  *
- * Start:  {appId, provider: "assemblyai" | "openai", language?}
- *         → LiveSessionGrant
- *         429 LIVE_LIMIT_REACHED  monthly speaker-labelled time used up
- *         422 LANGUAGE_UNSUPPORTED  AssemblyAI can't stream this language
- * Usage:  {appId, action: "usage", provider: "assemblyai", seconds}
- *         → {ok: true}   (counts toward the monthly allowance)
+ * Body: {appId, provider: "assemblyai" | "openai", language?, maxSeconds?}
+ *       maxSeconds caps an AssemblyAI session at what the user's budget
+ *       still covers; AssemblyAI ends the session there.
+ * → LiveSessionGrant
+ *   422 LANGUAGE_UNSUPPORTED  AssemblyAI can't stream this language
  */
 exports.liveSession = functions.https.onRequest({
     secrets: [assemblyAiKey, openaiKey],
@@ -93,25 +92,14 @@ exports.liveSession = functions.https.onRequest({
     }
     const auth = await (0, auth_1.verifyAuth)(req);
     const clientId = (0, rate_limiter_1.getClientId)(req, auth.uid);
-    if (body["action"] === "usage") {
-        const seconds = body["seconds"];
-        if (provider !== "assemblyai" || typeof seconds !== "number") {
-            res.status(400).json({ error: "usage needs provider assemblyai and seconds" });
-            return;
-        }
-        try {
-            await (0, allowance_1.recordAssemblyAiSeconds)(clientId, seconds);
-        }
-        catch (e) {
-            functions.logger.error("[liveSession] usage write failed", { msg: e.message });
-        }
-        res.json({ ok: true });
-        return;
-    }
     const languageRaw = typeof body["language"] === "string" ?
         body["language"].trim().toLowerCase() :
         "";
     const language = LANGUAGE_CODE.test(languageRaw) ? languageRaw : null;
+    const maxSecondsRaw = body["maxSeconds"];
+    const maxSeconds = typeof maxSecondsRaw === "number" && maxSecondsRaw > 0 ?
+        Math.min(maxSecondsRaw, MAX_SESSION_SECONDS) :
+        MAX_SESSION_SECONDS;
     const { allowed } = await (0, rate_limiter_1.checkRateLimit)(clientId, `${appId}-live`);
     if (!allowed) {
         res.status(429).json({
@@ -121,7 +109,7 @@ exports.liveSession = functions.https.onRequest({
         return;
     }
     try {
-        const grant = await startSession(provider, clientId, language);
+        const grant = await startSession(provider, language, maxSeconds);
         if ("code" in grant) {
             res.status(grant.status).json({ error: grant.error, code: grant.code });
             return;
@@ -140,7 +128,7 @@ exports.liveSession = functions.https.onRequest({
         });
     }
 });
-async function startSession(provider, clientId, language) {
+async function startSession(provider, language, maxSeconds) {
     if (provider === "openai") {
         // OpenAI's realtime language field takes ISO 639-1 codes only.
         return (0, openai_1.createOpenAiSession)(openaiKey.value().trim(), {
@@ -154,16 +142,8 @@ async function startSession(provider, clientId, language) {
             error: `Speaker-labelled live transcription doesn't support ${language}`,
         };
     }
-    const remaining = await (0, allowance_1.remainingAssemblyAiSeconds)(clientId);
-    if (remaining < MIN_ASSEMBLYAI_SECONDS) {
-        return {
-            status: 429,
-            code: "LIVE_LIMIT_REACHED",
-            error: "Monthly speaker-labelled live time used up",
-        };
-    }
     return (0, assemblyai_1.createAssemblyAiSession)(assemblyAiKey.value().trim(), {
-        maxSessionSeconds: remaining,
+        maxSessionSeconds: maxSeconds,
         language,
     });
 }

@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.liveSession = exports.transcribeSpeakers = exports.processAi = exports.health = void 0;
+exports.transcribeFile = exports.liveSession = exports.transcribeSpeakers = exports.processAi = exports.health = void 0;
 const admin = __importStar(require("firebase-admin"));
 const functions = __importStar(require("firebase-functions/v2"));
 const process_1 = require("./ai/process");
@@ -57,4 +57,7 @@ Object.defineProperty(exports, "transcribeSpeakers", { enumerable: true, get: fu
 // POST /liveSession — live transcription credentials (voicenote only)
 var session_1 = require("./live/session");
 Object.defineProperty(exports, "liveSession", { enumerable: true, get: function () { return session_1.liveSession; } });
+// POST /transcribeFile — AssemblyAI file transcription (voicenote only)
+var file_1 = require("./transcription/file");
+Object.defineProperty(exports, "transcribeFile", { enumerable: true, get: function () { return file_1.transcribeFile; } });
 //# sourceMappingURL=index.js.map

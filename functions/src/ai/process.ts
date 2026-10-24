@@ -31,6 +31,10 @@ function maxCompletionTokens(task: TaskType): number {
   switch (task) {
     case "chat":
       return 1024;
+    case "custom":
+      // Fitness100 sends a full workout or weekly report through this
+      // task. 512 cuts the JSON off.
+      return 2048;
     case "cleanupTranscript":
     case "cleanupAndTitle":
       return 16384;

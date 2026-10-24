@@ -3,7 +3,6 @@ import {defineSecret} from "firebase-functions/params";
 import {verifyAuth} from "../auth";
 import {checkRateLimit, getClientId} from "../rate-limiter";
 import {ASSEMBLYAI_LANGUAGES, createAssemblyAiSession} from "./assemblyai";
-import {recordAssemblyAiSeconds, remainingAssemblyAiSeconds} from "./allowance";
 import {createOpenAiSession} from "./openai";
 import {LiveProvider, LiveSessionGrant} from "./types";
 
@@ -13,21 +12,21 @@ const openaiKey = defineSecret("OPENAI_API_KEY");
 
 const ALLOWED_APP_IDS = new Set(["voicenote"]);
 const LANGUAGE_CODE = /^[a-z]{2,3}$/;
-/** Below this, a new speaker-labelled session isn't worth opening. */
-const MIN_ASSEMBLYAI_SECONDS = 60;
+/** AssemblyAI's own per-session cap. */
+const MAX_SESSION_SECONDS = 3 * 60 * 60;
 
 /**
  * POST /liveSession — short-lived credentials for live transcription.
  *
- * The app picks the provider and falls back on its own; this function only
- * issues credentials, so provider API keys never leave the server.
+ * The app picks the provider, falls back on its own, and tracks each user's
+ * monthly budget; this function only issues credentials, so provider API
+ * keys never leave the server.
  *
- * Start:  {appId, provider: "assemblyai" | "openai", language?}
- *         → LiveSessionGrant
- *         429 LIVE_LIMIT_REACHED  monthly speaker-labelled time used up
- *         422 LANGUAGE_UNSUPPORTED  AssemblyAI can't stream this language
- * Usage:  {appId, action: "usage", provider: "assemblyai", seconds}
- *         → {ok: true}   (counts toward the monthly allowance)
+ * Body: {appId, provider: "assemblyai" | "openai", language?, maxSeconds?}
+ *       maxSeconds caps an AssemblyAI session at what the user's budget
+ *       still covers; AssemblyAI ends the session there.
+ * → LiveSessionGrant
+ *   422 LANGUAGE_UNSUPPORTED  AssemblyAI can't stream this language
  */
 export const liveSession = functions.https.onRequest(
   {
@@ -68,25 +67,14 @@ export const liveSession = functions.https.onRequest(
     const auth = await verifyAuth(req as Parameters<typeof verifyAuth>[0]);
     const clientId = getClientId(req as Parameters<typeof getClientId>[0], auth.uid);
 
-    if (body["action"] === "usage") {
-      const seconds = body["seconds"];
-      if (provider !== "assemblyai" || typeof seconds !== "number") {
-        res.status(400).json({error: "usage needs provider assemblyai and seconds"});
-        return;
-      }
-      try {
-        await recordAssemblyAiSeconds(clientId, seconds);
-      } catch (e) {
-        functions.logger.error("[liveSession] usage write failed", {msg: (e as Error).message});
-      }
-      res.json({ok: true});
-      return;
-    }
-
     const languageRaw = typeof body["language"] === "string" ?
       body["language"].trim().toLowerCase() :
       "";
     const language = LANGUAGE_CODE.test(languageRaw) ? languageRaw : null;
+    const maxSecondsRaw = body["maxSeconds"];
+    const maxSeconds = typeof maxSecondsRaw === "number" && maxSecondsRaw > 0 ?
+      Math.min(maxSecondsRaw, MAX_SESSION_SECONDS) :
+      MAX_SESSION_SECONDS;
 
     const {allowed} = await checkRateLimit(clientId, `${appId}-live`);
     if (!allowed) {
@@ -98,7 +86,7 @@ export const liveSession = functions.https.onRequest(
     }
 
     try {
-      const grant = await startSession(provider, clientId, language);
+      const grant = await startSession(provider, language, maxSeconds);
       if ("code" in grant) {
         res.status(grant.status).json({error: grant.error, code: grant.code});
         return;
@@ -122,8 +110,8 @@ type Refusal = {status: number; code: string; error: string};
 
 async function startSession(
   provider: LiveProvider,
-  clientId: string,
   language: string | null,
+  maxSeconds: number,
 ): Promise<LiveSessionGrant | Refusal> {
   if (provider === "openai") {
     // OpenAI's realtime language field takes ISO 639-1 codes only.
@@ -139,16 +127,8 @@ async function startSession(
       error: `Speaker-labelled live transcription doesn't support ${language}`,
     };
   }
-  const remaining = await remainingAssemblyAiSeconds(clientId);
-  if (remaining < MIN_ASSEMBLYAI_SECONDS) {
-    return {
-      status: 429,
-      code: "LIVE_LIMIT_REACHED",
-      error: "Monthly speaker-labelled live time used up",
-    };
-  }
   return createAssemblyAiSession(assemblyAiKey.value().trim(), {
-    maxSessionSeconds: remaining,
+    maxSessionSeconds: maxSeconds,
     language,
   });
 }

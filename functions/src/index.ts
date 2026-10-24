@@ -26,3 +26,6 @@ export {transcribeSpeakers} from "./ai/speakers";
 
 // POST /liveSession — live transcription credentials (voicenote only)
 export {liveSession} from "./live/session";
+
+// POST /transcribeFile — AssemblyAI file transcription (voicenote only)
+export {transcribeFile} from "./transcription/file";
